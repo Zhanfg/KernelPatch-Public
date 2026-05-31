@@ -111,7 +111,17 @@ struct su_profile
 #define SUPERCALL_SU_RESET_PATH 0x1111
 #define SUPERCALL_SU_GET_SAFEMODE 0x1112
 
+/* App profile system (KernelSU-inspired) */
+#define SUPERCALL_APP_PROFILE_GET  0x1120  /* arg1: uid, arg2: struct app_profile __user * */
+#define SUPERCALL_APP_PROFILE_SET  0x1121  /* arg1: struct app_profile __user * */
+#define SUPERCALL_APP_PROFILE_LIST 0x1122  /* arg1: uids __user *, arg2: count */
+#define SUPERCALL_APP_PROFILE_NUM  0x1123  /* returns count */
 
+/* SELinux policy operations */
+#define SUPERCALL_SEPOLICY_CMD     0x1130  /* arg1: data __user *, arg2: len */
+
+/* Safe mode */
+#define SUPERCALL_SET_SAFEMODE     0x1140  /* arg1: int (0 or 1) */
 
 #define SUPERCALL_MAX 0x1200
 

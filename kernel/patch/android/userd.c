@@ -1458,6 +1458,12 @@ static void handle_after_execve(hook_local_t *hook_local, long ret)
         commit_su(0, all_allow_sctx);
     }
 
+    // Umount module overlays for non-root apps
+    if (ret >= 0) {
+        extern void umount_modules_for_current(void);
+        umount_modules_for_current();
+    }
+
     if (ret >= 0) {
         if (hook_local->data1) {
             post_user_exec_init();

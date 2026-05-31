@@ -11,6 +11,7 @@
 #include <linux/spinlock.h>
 #include <linux/sched.h>
 #include <uapi/scdefs.h>
+#include <uapi/app_profile.h>
 #include <pgtable.h>
 #include <taskext.h>
 #include <asm/current.h>
@@ -23,6 +24,17 @@ int commit_kernel_su();
 int commit_common_su(uid_t to_uid, const char *sctx);
 int commit_su(uid_t uid, const char *sctx);
 int task_su(pid_t pid, uid_t to_uid, const char *sctx);
+
+/* App profile system */
+int app_profile_set(const struct app_profile *profile);
+int app_profile_get(uid_t uid, struct app_profile *out);
+int app_profile_list(uid_t *uids, int max_count);
+int app_profile_num(void);
+int commit_su_with_profile(const struct root_profile *rp);
+int check_umount_modules(uid_t uid);
+
+/* Safe mode */
+extern int kp_safe_mode;
 
 /**
  * @brief Whether to make the current task bypass all selinux permission checks.

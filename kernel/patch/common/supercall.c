@@ -31,6 +31,8 @@
 #include <sucompat.h>
 #include <accctl.h>
 #include <kstorage.h>
+#include <uapi/app_profile.h>
+#include <sepolicy.h>
 #ifdef ANDROID
 #include <userd.h>
 #endif
@@ -270,6 +272,43 @@ static long call_kstorage_remove(int gid, long did)
     return remove_kstorage(gid, did);
 }
 
+/* App profile supercall handlers */
+static long call_app_profile_set(const struct app_profile __user *uprofile)
+{
+    struct app_profile *profile = memdup_user(uprofile, sizeof(struct app_profile));
+    if (!profile || IS_ERR(profile)) return PTR_ERR(profile);
+    profile->key[sizeof(profile->key) - 1] = '\0';
+    int rc = app_profile_set(profile);
+    kvfree(profile);
+    return rc;
+}
+
+static long call_app_profile_get(uid_t uid, struct app_profile __user *uprofile)
+{
+    struct app_profile profile;
+    int rc = app_profile_get(uid, &profile);
+    if (rc) return rc;
+    return compat_copy_to_user(uprofile, &profile, sizeof(struct app_profile));
+}
+
+static long call_app_profile_list(uid_t __user *uids, int max_count)
+{
+    uid_t *buf = kvmalloc(max_count * sizeof(uid_t), GFP_KERNEL);
+    if (!buf) return -ENOMEM;
+    int count = app_profile_list(buf, max_count);
+    int rc = compat_copy_to_user(uids, buf, count * sizeof(uid_t));
+    kvfree(buf);
+    return count;
+}
+
+static long call_set_safemode(int mode)
+{
+    extern int kp_safe_mode;
+    kp_safe_mode = !!mode;
+    logkfd("safe mode set to %d\n", kp_safe_mode);
+    return 0;
+}
+
 static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, long arg4)
 {
     switch (cmd) {
@@ -292,8 +331,10 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
 
     switch (cmd) {
     case SUPERCALL_SU:
+        if (kp_safe_mode) return -EACCES;
         return call_su((struct su_profile * __user) arg1);
     case SUPERCALL_SU_TASK:
+        if (kp_safe_mode) return -EACCES;
         return call_su_task((pid_t)arg1, (struct su_profile * __user) arg2);
 
     case SUPERCALL_SU_GRANT_UID:
@@ -329,6 +370,21 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
     case SUPERCALL_SU_GET_SAFEMODE:
         return call_su_get_safemode();
 #endif
+
+    /* App profile system */
+    case SUPERCALL_APP_PROFILE_GET:
+        return call_app_profile_get((uid_t)arg1, (struct app_profile __user *)arg2);
+    case SUPERCALL_APP_PROFILE_SET:
+        return call_app_profile_set((const struct app_profile __user *)arg1);
+    case SUPERCALL_APP_PROFILE_LIST:
+        return call_app_profile_list((uid_t __user *)arg1, (int)arg2);
+    case SUPERCALL_APP_PROFILE_NUM:
+        return app_profile_num();
+
+    /* Safe mode */
+    case SUPERCALL_SET_SAFEMODE:
+        return call_set_safemode((int)arg1);
+
     default:
         break;
     }
@@ -369,6 +425,10 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
         return call_kpm_list((char *__user)arg1, (int)arg2);
     case SUPERCALL_KPM_INFO:
         return call_kpm_info((const char *__user)arg1, (char *__user)arg2, (int)arg3);
+
+    /* SELinux policy operations (authed only) */
+    case SUPERCALL_SEPOLICY_CMD:
+        return sepolicy_apply((const void __user *)arg1, (int)arg2);
     }
 
     switch (cmd) {
