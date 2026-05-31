@@ -14,8 +14,10 @@
 #include <common.h>
 #include <log.h>
 #include <linux/string.h>
-#include <kallsyms.h>
+#include <asm/current.h>
+#include <taskext.h>
 #include <kputils.h>
+#include <uapi/asm-generic/errno.h>
 
 /* Names to match for auto-rename */
 static const char *hide_names[] = { "kpatch", "kptools", "kp", NULL };
