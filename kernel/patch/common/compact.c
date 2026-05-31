@@ -16,6 +16,7 @@
 #include <linux/security.h>
 
 /* Forward declarations for functions exposed to KPM modules */
+extern int is_su_allow_uid(uid_t uid);
 extern int app_profile_set(const struct app_profile *profile);
 extern int app_profile_get(uid_t uid, struct app_profile *out);
 extern int check_umount_modules(uid_t uid);
@@ -28,10 +29,10 @@ struct compact_symbol {
 };
 
 static struct compact_symbol compact_symbols[] = {
-    /* Core KP functions */
-    { "compact_find_symbol",        (void *)compact_find_symbol },
-    { "kallsyms_lookup_name",       (void *)kallsyms_lookup_name },
-    { "symbol_lookup_name",         (void *)symbol_lookup_name },
+    /* Core KP functions — filled at init (not compile-time constants) */
+    { "compact_find_symbol",        0 },
+    { "kallsyms_lookup_name",       0 },
+    { "symbol_lookup_name",         0 },
 
     /* Access control */
     { "is_su_allow_uid",            0 }, /* filled at init */
@@ -95,8 +96,14 @@ unsigned long compact_find_symbol(const char *name)
 
 void compact_init(void)
 {
-    /* Fill dynamic addresses */
+    /* Fill addresses that can't be compile-time constants */
     for (int i = 0; compact_symbols[i].name; i++) {
+        if (!strcmp(compact_symbols[i].name, "compact_find_symbol"))
+            compact_symbols[i].addr = (void *)compact_find_symbol;
+        if (!strcmp(compact_symbols[i].name, "kallsyms_lookup_name"))
+            compact_symbols[i].addr = (void *)kallsyms_lookup_name;
+        if (!strcmp(compact_symbols[i].name, "symbol_lookup_name"))
+            compact_symbols[i].addr = (void *)symbol_lookup_name;
         if (!strcmp(compact_symbols[i].name, "compact_log_info"))
             compact_symbols[i].addr = (void *)compact_log_info;
         if (!strcmp(compact_symbols[i].name, "compact_log_error"))
