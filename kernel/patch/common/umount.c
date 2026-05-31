@@ -1,10 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Root/module detection hiding — inspired by ReSukiSU kernel_umount.c.
- * Unmounts module-related mount points for specific apps to prevent root detection.
- *
- * Trigger: setresuid syscall hook (when app process gets its real UID).
- * Config: runtime-configurable mount list via supercall.
+ * Unmounts module-related mount points for specific apps.
  */
 
 #include <ktypes.h>
@@ -13,39 +10,32 @@
 #include <linux/string.h>
 #include <linux/list.h>
 #include <linux/spinlock.h>
-#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <kallsyms.h>
 #include <kputils.h>
 #include <accctl.h>
 #include <uapi/asm-generic/errno.h>
 
-/* Mount entry for the umount list */
 struct mount_entry {
     char path[256];
-    unsigned int flags; /* MNT_DETACH=2, etc. */
+    unsigned int flags;
     struct list_head list;
 };
 
 static LIST_HEAD(mount_list);
-static DEFINE_RWLOCK(mount_list_lock);
+static spinlock_t mount_list_lock;
+static int umount_initialized = 0;
 static int umount_enabled = 1;
 
-/* Default paths to unmount — these hide root/module traces */
 static const char *default_paths[] = {
     "/data/adb/modules",
     "/data/adb/kp-next",
     "/data/adb/kp",
     "/data/adb/ap",
     "/data/adb/ksu",
-    "/system",
-    "/vendor",
-    "/product",
-    "/system_ext",
     NULL,
 };
 
-/* Resolve and call umount */
 typedef int (*umount_fn_t)(const char __user *name, int flags);
 static umount_fn_t resolve_umount(void)
 {
@@ -60,8 +50,6 @@ static void try_umount_one(const char *mnt, int flags)
 {
     umount_fn_t umount_fn = resolve_umount();
     if (!umount_fn) return;
-
-    /* Use MNT_DETACH (lazy) by default for safety */
     int use_flags = (flags > 0) ? flags : 2; /* MNT_DETACH */
     int err = umount_fn((const char __user *)mnt, use_flags);
     if (err == 0) {
@@ -69,112 +57,103 @@ static void try_umount_one(const char *mnt, int flags)
     }
 }
 
-/*
- * Called when an app process gets its real UID (setresuid hook).
- * Checks if the app should have modules hidden, then unmounts.
- */
 void umount_for_app(uid_t uid)
 {
-    if (!umount_enabled) return;
-
-    /* Check app profile: only umount if configured */
+    if (!umount_enabled || !umount_initialized) return;
     if (!check_umount_modules(uid)) return;
 
-    read_lock(&mount_list_lock);
+    spin_lock(&mount_list_lock);
     struct mount_entry *entry;
     list_for_each_entry(entry, &mount_list, list) {
         try_umount_one(entry->path, entry->flags);
     }
-    read_unlock(&mount_list_lock);
+    spin_unlock(&mount_list_lock);
 }
 
-/*
- * Simplified version for execve hook (backward compat).
- * Checks current UID.
- */
 void umount_modules_for_current(void)
 {
-    if (!umount_enabled) return;
-    uid_t uid = current_uid();
-    umount_for_app(uid);
+    if (!umount_enabled || !umount_initialized) return;
+    umount_for_app(current_uid());
 }
-
-/* --- Runtime configuration via supercall --- */
 
 int umount_add_path(const char *path, unsigned int flags)
 {
     if (!path || !path[0]) return -EINVAL;
 
-    /* Check for duplicates */
-    read_lock(&mount_list_lock);
+    spin_lock(&mount_list_lock);
+    /* Check duplicates */
     struct mount_entry *entry;
     list_for_each_entry(entry, &mount_list, list) {
         if (!strcmp(entry->path, path)) {
-            read_unlock(&mount_list_lock);
-            entry->flags = flags; /* update flags */
+            entry->flags = flags ? flags : 2;
+            spin_unlock(&mount_list_lock);
             return 0;
         }
     }
-    read_unlock(&mount_list_lock);
 
-    struct mount_entry *new_entry = vmalloc(sizeof(struct mount_entry));
-    if (!new_entry) return -ENOMEM;
-    strncpy(new_entry->path, path, sizeof(new_entry->path) - 1);
-    new_entry->path[sizeof(new_entry->path) - 1] = '\0';
-    new_entry->flags = flags ? flags : 2; /* default MNT_DETACH */
+    struct mount_entry *ne = vmalloc(sizeof(struct mount_entry));
+    if (!ne) {
+        spin_unlock(&mount_list_lock);
+        return -ENOMEM;
+    }
+    strncpy(ne->path, path, sizeof(ne->path) - 1);
+    ne->path[sizeof(ne->path) - 1] = '\0';
+    ne->flags = flags ? flags : 2;
+    list_add_tail(&ne->list, &mount_list);
+    spin_unlock(&mount_list_lock);
 
-    write_lock(&mount_list_lock);
-    list_add_tail(&new_entry->list, &mount_list);
-    write_unlock(&mount_list_lock);
-
-    logkfi("umount: added path %s flags=%u\n", path, new_entry->flags);
+    logkfi("umount: added %s\n", path);
     return 0;
 }
 
 int umount_remove_path(const char *path)
 {
     if (!path) return -EINVAL;
-    write_lock(&mount_list_lock);
+    spin_lock(&mount_list_lock);
     struct mount_entry *entry, *tmp;
     list_for_each_entry_safe(entry, tmp, &mount_list, list) {
         if (!strcmp(entry->path, path)) {
             list_del(&entry->list);
             vfree(entry);
-            write_unlock(&mount_list_lock);
-            logkfi("umount: removed path %s\n", path);
+            spin_unlock(&mount_list_lock);
             return 0;
         }
     }
-    write_unlock(&mount_list_lock);
+    spin_unlock(&mount_list_lock);
     return -ENOENT;
 }
 
 void umount_set_enabled(int enable)
 {
     umount_enabled = !!enable;
-    logkfi("umount: %s\n", enable ? "enabled" : "disabled");
 }
 
 int umount_list_paths(char *out, int size)
 {
     int off = 0;
-    read_lock(&mount_list_lock);
+    spin_lock(&mount_list_lock);
     struct mount_entry *entry;
     list_for_each_entry(entry, &mount_list, list) {
-        off += snprintf(out + off, size - 1 - off, "%s (flags=%u)\n",
-                        entry->path, entry->flags);
+        int remaining = size - 1 - off;
+        if (remaining <= 0) break;
+        int n = strlen(entry->path);
+        if (n > remaining) n = remaining;
+        memcpy(out + off, entry->path, n);
+        off += n;
+        if (off < size - 1) out[off++] = '\n';
     }
-    read_unlock(&mount_list_lock);
+    spin_unlock(&mount_list_lock);
     if (off > 0) out[off - 1] = '\0';
+    else out[0] = '\0';
     return off;
 }
 
-/* Initialize with default paths */
 void umount_init(void)
 {
+    spin_lock_init(&mount_list_lock);
     for (int i = 0; default_paths[i]; i++) {
-        umount_add_path(default_paths[i], 2 /* MNT_DETACH */);
+        umount_add_path(default_paths[i], 2);
     }
-    log_boot("umount: initialized with %d default paths\n",
-             (int)(sizeof(default_paths) / sizeof(default_paths[0]) - 1));
+    umount_initialized = 1;
+    log_boot("umount: initialized with default paths\n");
 }
