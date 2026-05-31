@@ -9,6 +9,7 @@
 #include <log.h>
 #include <module.h>
 #include <uapi/kpm_event.h>
+#include <kpm_safety.h>
 
 int report_user_event(const char *event, const char *args)
 {
@@ -24,6 +25,8 @@ int report_user_event(const char *event, const char *args)
     }
     if (lib_strcmp(safe_event, "boot-completed") == 0) {
         module_dispatch_event(KPM_EVENT_BOOT_COMPLETED, NULL, safe_args);
+        /* Confirm boot succeeded — reset crash protection counter */
+        kpm_safety_confirm_boot_completed();
     }
     if (lib_strcmp(safe_event, "uid_listener") == 0 && lib_strcmp(safe_args, "package-list-updated") == 0) {
         int trust_rc = refresh_trusted_manager_state();
@@ -36,6 +39,8 @@ int report_user_event(const char *event, const char *args)
     }
     if (lib_strcmp(safe_event, "boot-completed") == 0) {
         module_dispatch_event(KPM_EVENT_BOOT_COMPLETED, NULL, safe_args);
+        /* Confirm boot succeeded — reset crash protection counter */
+        kpm_safety_confirm_boot_completed();
     }
     #endif
     logki("user report event: %s, args: %s\n", safe_event, safe_args);

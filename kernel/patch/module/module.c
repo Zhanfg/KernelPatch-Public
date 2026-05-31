@@ -28,6 +28,7 @@
 #include <compact.h>
 #include <selinux_hide.h>
 #include <proc_hide.h>
+#include <kpm_safety.h>
 
 #define SZ_128M 0x08000000
 
@@ -483,6 +484,19 @@ long load_module(const void *data, int len, const char *args, const char *event,
     if ((rc = elf_header_check(info))) goto out;
     if ((rc = setup_load_info(info))) goto out;
 
+    /* Safety: check blacklist */
+    if (kpm_safety_check_blacklist(info->info.name)) {
+        logkfe("kpm_safety: skipping blacklisted module %s\n", info->info.name);
+        rc = -EACCES;
+        goto out;
+    }
+
+    /* Safety: validate ELF structure */
+    if ((rc = kpm_safety_validate(data, len))) {
+        logkfe("kpm_safety: validation failed for %s\n", info->info.name);
+        goto out;
+    }
+
     if (find_module(info->info.name)) {
         logkfd("%s exist\n", info->info.name);
         rc = -EEXIST;
@@ -510,6 +524,9 @@ long load_module(const void *data, int len, const char *args, const char *event,
     if ((rc = apply_relocations(mod, info))) goto free;
 
     flush_icache_all();
+
+    /* Mark this KPM as loading (for crash detection) */
+    kpm_safety_mark_loading(info->info.name);
 
     rc = (*mod->init)(mod->args, event, reserved);
 
@@ -747,6 +764,16 @@ void module_init()
 {
     INIT_LIST_HEAD(&modules.list);
     spin_lock_init(&module_lock);
+
+    kpm_safety_init();
+
+    /* Boot counter: if too many failed boots, activate safe mode */
+    if (kpm_safety_check_boot_count()) {
+        extern int kp_safe_mode;
+        kp_safe_mode = 1;
+        log_boot("kpm_safety: safe mode activated due to boot counter\n");
+    }
+
     compact_init();
     umount_init();
     selinux_hide_init();

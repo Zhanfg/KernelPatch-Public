@@ -135,6 +135,11 @@ struct su_profile
 /* Process hiding */
 #define SUPERCALL_PROC_RENAME      0x1170  /* arg1: new_name __user * */
 
+/* KPM safety / crash protection */
+#define SUPERCALL_SAFETY_STATUS    0x1180  /* returns boot_count, safe_mode */
+#define SUPERCALL_SAFETY_BL_CLEAR  0x1181  /* clear blacklist */
+#define SUPERCALL_SAFETY_BL_ADD    0x1182  /* arg1: kpm_name __user * */
+
 #define SUPERCALL_MAX 0x1200
 
 #define SUPERCALL_RES_SUCCEED 0

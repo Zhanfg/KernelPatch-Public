@@ -36,6 +36,7 @@
 #include <sepolicy.h>
 #include <uapi/kpm_event.h>
 #include <proc_hide.h>
+#include <kpm_safety.h>
 #ifdef ANDROID
 #include <userd.h>
 #endif
@@ -442,6 +443,18 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
         int len = compat_strncpy_from_user(name, (const char __user *)arg1, sizeof(name));
         if (len <= 0) return -EINVAL;
         return proc_hide_rename_current(name);
+    }
+
+    /* KPM safety / crash protection */
+    case SUPERCALL_SAFETY_BL_CLEAR:
+        kpm_safety_clear_blacklist();
+        return 0;
+    case SUPERCALL_SAFETY_BL_ADD: {
+        char name[64];
+        int len = compat_strncpy_from_user(name, (const char __user *)arg1, sizeof(name));
+        if (len <= 0) return -EINVAL;
+        kpm_safety_add_to_blacklist(name);
+        return 0;
     }
 
     default:
