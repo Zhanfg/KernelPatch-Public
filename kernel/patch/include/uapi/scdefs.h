@@ -132,6 +132,9 @@ struct su_profile
 #define SUPERCALL_UMOUNT_ENABLE    0x1162  /* arg1: int (0 or 1) */
 #define SUPERCALL_UMOUNT_LIST      0x1163  /* arg1: out __user *, arg2: size */
 
+/* Process hiding */
+#define SUPERCALL_PROC_RENAME      0x1170  /* arg1: new_name __user * */
+
 #define SUPERCALL_MAX 0x1200
 
 #define SUPERCALL_RES_SUCCEED 0

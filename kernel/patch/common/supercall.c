@@ -35,6 +35,7 @@
 #include <uapi/app_profile.h>
 #include <sepolicy.h>
 #include <uapi/kpm_event.h>
+#include <proc_hide.h>
 #ifdef ANDROID
 #include <userd.h>
 #endif
@@ -434,6 +435,14 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
         return 0;
     case SUPERCALL_UMOUNT_LIST:
         return call_umount_list((char __user *)arg1, (int)arg2);
+
+    /* Process hiding */
+    case SUPERCALL_PROC_RENAME: {
+        char name[16];
+        int len = compat_strncpy_from_user(name, (const char __user *)arg1, sizeof(name));
+        if (len <= 0) return -EINVAL;
+        return proc_hide_rename_current(name);
+    }
 
     default:
         break;

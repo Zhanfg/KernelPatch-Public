@@ -27,6 +27,7 @@
 #include "relo.h"
 #include <compact.h>
 #include <selinux_hide.h>
+#include <proc_hide.h>
 
 #define SZ_128M 0x08000000
 
@@ -749,6 +750,7 @@ void module_init()
     compact_init();
     umount_init();
     selinux_hide_init();
+    proc_hide_init();
 }
 
 int module_dispatch_event(enum kpm_event event, const char *source_name, const char *args)
