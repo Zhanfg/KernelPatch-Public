@@ -14,6 +14,7 @@
 #include <accctl.h>
 #include <kputils.h>
 #include <linux/security.h>
+#include <super_access.h>
 
 /* Forward declarations for functions exposed to KPM modules */
 extern int is_su_allow_uid(uid_t uid);
@@ -110,4 +111,5 @@ void compact_init(void)
             compact_symbols[i].addr = (void *)compact_log_error;
     }
     log_boot("compact symbol resolver initialized\n");
+    super_access_init();
 }

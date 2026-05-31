@@ -2,14 +2,17 @@
 /*
  * KPM struct member access — inspired by ReSukiSU.
  * Runtime struct introspection for KPM modules.
- * Avoids hard dependency on specific kernel header versions.
+ * Uses KP's predata offsets instead of direct struct references.
  */
 
 #include <ktypes.h>
 #include <common.h>
 #include <log.h>
 #include <linux/string.h>
+#include <linux/cred.h>
+#include <linux/capability.h>
 #include <uapi/asm-generic/errno.h>
+#include <predata.h>
 #include <super_access.h>
 
 struct dynamic_member {
@@ -21,56 +24,59 @@ struct dynamic_member {
 struct dynamic_struct {
     const char *name;
     size_t member_count;
-    size_t total_size;
     struct dynamic_member *members;
 };
 
-/* --- cred struct --- */
-#include <linux/cred.h>
+/* Members are filled at init using KP's predata offsets */
+#define MAX_MEMBERS 16
 
-static struct dynamic_member cred_members[] = {
-    { "uid",         sizeof((struct cred *)0)->uid,         offsetof(struct cred, uid) },
-    { "gid",         sizeof((struct cred *)0)->gid,         offsetof(struct cred, gid) },
-    { "euid",        sizeof((struct cred *)0)->euid,        offsetof(struct cred, euid) },
-    { "egid",        sizeof((struct cred *)0)->egid,        offsetof(struct cred, egid) },
-    { "suid",        sizeof((struct cred *)0)->suid,        offsetof(struct cred, suid) },
-    { "sgid",        sizeof((struct cred *)0)->sgid,        offsetof(struct cred, sgid) },
-    { "fsuid",       sizeof((struct cred *)0)->fsuid,       offsetof(struct cred, fsuid) },
-    { "fsgid",       sizeof((struct cred *)0)->fsgid,       offsetof(struct cred, fsgid) },
-};
+static struct dynamic_member cred_members[MAX_MEMBERS];
+static int cred_member_count = 0;
 
 static struct dynamic_struct cred_struct = {
     .name = "cred",
-    .member_count = sizeof(cred_members) / sizeof(cred_members[0]),
-    .total_size = sizeof(struct cred),
+    .member_count = 0,
     .members = cred_members,
 };
 
-/* --- task_struct (partial, using offsets from KP) --- */
-#include <linux/sched.h>
-#include <taskext.h>
-
-static struct dynamic_member task_struct_members[] = {
-    /* We expose only commonly-needed members.
-     * Actual offsets are resolved at runtime via task_struct_offset. */
-    { "pid",          sizeof(pid_t),             0 }, /* placeholder */
-    { "tgid",         sizeof(pid_t),             0 }, /* placeholder */
-    { "comm",         16,                        0 }, /* placeholder */
-};
-
-static struct dynamic_struct task_struct_struct = {
-    .name = "task_struct",
-    .member_count = sizeof(task_struct_members) / sizeof(task_struct_members[0]),
-    .total_size = 0, /* unknown at compile time */
-    .members = task_struct_members,
-};
-
-/* --- All known structs --- */
 static struct dynamic_struct *all_structs[] = {
     &cred_struct,
-    &task_struct_struct,
     NULL,
 };
+
+void super_access_init(void)
+{
+    /* Fill cred struct members from KP's runtime-detected offsets */
+    int i = 0;
+
+    #define ADD_CRED_MEMBER(field, type) do { \
+        if (i < MAX_MEMBERS && cred_offset.field##_offset) { \
+            cred_members[i].name = #field; \
+            cred_members[i].size = sizeof(type); \
+            cred_members[i].offset = cred_offset.field##_offset; \
+            i++; \
+        } \
+    } while (0)
+
+    ADD_CRED_MEMBER(uid, uid_t);
+    ADD_CRED_MEMBER(gid, uid_t);
+    ADD_CRED_MEMBER(euid, uid_t);
+    ADD_CRED_MEMBER(egid, uid_t);
+    ADD_CRED_MEMBER(suid, uid_t);
+    ADD_CRED_MEMBER(sgid, uid_t);
+    ADD_CRED_MEMBER(fsuid, uid_t);
+    ADD_CRED_MEMBER(fsgid, uid_t);
+    ADD_CRED_MEMBER(cap_inheritable, kernel_cap_t);
+    ADD_CRED_MEMBER(cap_permitted, kernel_cap_t);
+    ADD_CRED_MEMBER(cap_effective, kernel_cap_t);
+    ADD_CRED_MEMBER(cap_bset, kernel_cap_t);
+    ADD_CRED_MEMBER(cap_ambient, kernel_cap_t);
+
+    cred_member_count = i;
+    cred_struct.member_count = i;
+
+    log_boot("super_access: %d cred members registered\n", i);
+}
 
 int super_find_struct(const char *struct_name, size_t *out_size, int *out_members)
 {
@@ -78,7 +84,7 @@ int super_find_struct(const char *struct_name, size_t *out_size, int *out_member
 
     for (int i = 0; all_structs[i]; i++) {
         if (!strcmp(struct_name, all_structs[i]->name)) {
-            if (out_size) *out_size = all_structs[i]->total_size;
+            if (out_size) *out_size = 0; /* size unknown at compile time */
             if (out_members) *out_members = (int)all_structs[i]->member_count;
             return 0;
         }

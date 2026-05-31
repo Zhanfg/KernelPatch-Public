@@ -10,6 +10,9 @@
 
 #include <ktypes.h>
 
+/* Initialize struct member tables from runtime offsets */
+void super_access_init(void);
+
 /*
  * Get struct info: size and member count.
  * Returns 0 on success, -ENOENT if struct not known.
