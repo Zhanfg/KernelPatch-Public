@@ -3,13 +3,27 @@ name: Build
 on:
   push:
     branches: [main]
-    paths: ['kernel/**', 'version']
+    paths: ['kernel/**', 'version', 'tests/**']
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  test:
+    name: KPM Validation
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 'lts/*'
+
+    - name: Validate test KPM files
+      run: node tests/validate_kpm.js
+
   build:
     runs-on: ubuntu-latest
     steps:
