@@ -1460,8 +1460,8 @@ static void handle_after_execve(hook_local_t *hook_local, long ret)
 
     // Umount module overlays for non-root apps
     if (ret >= 0) {
-        extern void umount_modules_for_current(void);
-        umount_modules_for_current();
+        extern void umount_for_app(uid_t uid);
+        umount_for_app(current_uid());
     }
 
     if (ret >= 0) {

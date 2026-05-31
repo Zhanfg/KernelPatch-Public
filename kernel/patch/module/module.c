@@ -688,6 +688,7 @@ void module_init()
     INIT_LIST_HEAD(&modules.list);
     spin_lock_init(&module_lock);
     compact_init();
+    umount_init();
 }
 
 int module_dispatch_event(enum kpm_event event, const char *source_name, const char *args)

@@ -126,6 +126,12 @@ struct su_profile
 /* KPM event dispatch */
 #define SUPERCALL_KPM_EVENT        0x1150  /* arg1: event enum, arg2: source_name, arg3: args */
 
+/* Umount/hiding configuration */
+#define SUPERCALL_UMOUNT_ADD       0x1160  /* arg1: path __user *, arg2: flags */
+#define SUPERCALL_UMOUNT_REMOVE    0x1161  /* arg1: path __user * */
+#define SUPERCALL_UMOUNT_ENABLE    0x1162  /* arg1: int (0 or 1) */
+#define SUPERCALL_UMOUNT_LIST      0x1163  /* arg1: out __user *, arg2: size */
+
 #define SUPERCALL_MAX 0x1200
 
 #define SUPERCALL_RES_SUCCEED 0

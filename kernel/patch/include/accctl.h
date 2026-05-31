@@ -36,6 +36,15 @@ int check_umount_modules(uid_t uid);
 /* Safe mode */
 extern int kp_safe_mode;
 
+/* Umount hiding */
+void umount_for_app(uid_t uid);
+void umount_modules_for_current(void);
+int umount_add_path(const char *path, unsigned int flags);
+int umount_remove_path(const char *path);
+void umount_set_enabled(int enable);
+int umount_list_paths(char *out, int size);
+void umount_init(void);
+
 /**
  * @brief Whether to make the current task bypass all selinux permission checks.
  * 

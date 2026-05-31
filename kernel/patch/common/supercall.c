@@ -323,6 +323,31 @@ static long call_kpm_event(int event, const char __user *usource, const char __u
                                  args[0] ? args : NULL);
 }
 
+/* Umount config handlers */
+static long call_umount_add(const char __user *upath, unsigned int flags)
+{
+    char path[256];
+    int len = compat_strncpy_from_user(path, upath, sizeof(path));
+    if (len <= 0) return -EINVAL;
+    return umount_add_path(path, flags);
+}
+
+static long call_umount_remove(const char __user *upath)
+{
+    char path[256];
+    int len = compat_strncpy_from_user(path, upath, sizeof(path));
+    if (len <= 0) return -EINVAL;
+    return umount_remove_path(path);
+}
+
+static long call_umount_list(char __user *out, int size)
+{
+    char buf[4096];
+    int sz = umount_list_paths(buf, sizeof(buf));
+    if (sz > size) return -ENOBUFS;
+    return compat_copy_to_user(out, buf, sz);
+}
+
 static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, long arg4)
 {
     switch (cmd) {
@@ -398,6 +423,17 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
     /* Safe mode */
     case SUPERCALL_SET_SAFEMODE:
         return call_set_safemode((int)arg1);
+
+    /* Umount/hiding config */
+    case SUPERCALL_UMOUNT_ADD:
+        return call_umount_add((const char __user *)arg1, (unsigned int)arg2);
+    case SUPERCALL_UMOUNT_REMOVE:
+        return call_umount_remove((const char __user *)arg1);
+    case SUPERCALL_UMOUNT_ENABLE:
+        umount_set_enabled((int)arg1);
+        return 0;
+    case SUPERCALL_UMOUNT_LIST:
+        return call_umount_list((char __user *)arg1, (int)arg2);
 
     default:
         break;
