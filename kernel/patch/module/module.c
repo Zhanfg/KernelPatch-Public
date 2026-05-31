@@ -311,12 +311,40 @@ static int move_module(struct module *mod, struct load_info *info)
 
         if (!mod->info.base && !strcmp(".kpm.info", sname)) mod->info.base = (const char *)dest;
     }
-    mod->info.name = info->info.name - info->info.base + mod->info.base;
-    mod->info.version = info->info.version - info->info.base + mod->info.base;
 
-    if (info->info.license) mod->info.license = info->info.license - info->info.base + mod->info.base;
-    if (info->info.author) mod->info.author = info->info.author - info->info.base + mod->info.base;
-    if (info->info.description) mod->info.description = info->info.description - info->info.base + mod->info.base;
+    /* For .ko/.o without .kpm.info, metadata is static (from setup_load_info).
+     * Use the strings directly — they point to the original ELF data (still valid). */
+    if (info->info.base) {
+        /* KPM format: compute relocated offsets */
+        mod->info.name = info->info.name - info->info.base + mod->info.base;
+        mod->info.version = info->info.version - info->info.base + mod->info.base;
+        if (info->info.license) mod->info.license = info->info.license - info->info.base + mod->info.base;
+        if (info->info.author) mod->info.author = info->info.author - info->info.base + mod->info.base;
+        if (info->info.description) mod->info.description = info->info.description - info->info.base + mod->info.base;
+    } else {
+        /* .ko/.o format: metadata strings point into original ELF data.
+         * Copy into per-module allocated buffers since original data is freed after load. */
+        char *buf = vmalloc(320); /* 64+32+32+64+128 = 320 */
+        if (buf) {
+            memset(buf, 0, 320);
+            strncpy(buf, info->info.name ?: "unknown", 63);
+            strncpy(buf + 64, info->info.version ?: "0.0.0", 31);
+            strncpy(buf + 96, info->info.license ?: "unknown", 31);
+            strncpy(buf + 128, info->info.author ?: "unknown", 63);
+            strncpy(buf + 192, info->info.description ?: "loaded from .ko", 127);
+            mod->info.name = buf;
+            mod->info.version = buf + 64;
+            mod->info.license = buf + 96;
+            mod->info.author = buf + 128;
+            mod->info.description = buf + 192;
+        } else {
+            mod->info.name = "unknown";
+            mod->info.version = "0.0.0";
+            mod->info.license = "unknown";
+            mod->info.author = "unknown";
+            mod->info.description = "oom";
+        }
+    }
 
     return 0;
 }
@@ -332,19 +360,43 @@ static int setup_load_info(struct load_info *info)
         return rc;
     }
 
-    if (!find_sec(info, ".kpm.init") || !find_sec(info, ".kpm.exit")) {
-        /* For .ko files, accept standard .init.text/.exit.text sections */
-        if (!find_sec(info, ".init.text") || !find_sec(info, ".exit.text")) {
-            logke("no .kpm.init/.kpm.exit or .init.text/.exit.text section\n");
-            return -ENOEXEC;
+    int has_kpm_init = find_sec(info, ".kpm.init") || find_sec(info, ".kpm.exit");
+    int has_ko_init = find_sec(info, ".init.text") || find_sec(info, ".exit.text");
+
+    if (!has_kpm_init && !has_ko_init) {
+        logke("no .kpm.init/.kpm.exit or .init.text/.exit.text section\n");
+        return -ENOEXEC;
+    }
+
+    /* .ko format: parse .modinfo for metadata */
+    if (!has_kpm_init && has_ko_init) {
+        int modinfo_idx = find_sec(info, ".modinfo");
+        if (modinfo_idx) {
+            /* Temporarily set index.info to .modinfo for get_modinfo() */
+            info->index.info = modinfo_idx;
+            info->info.base = get_sh_base(info, ".modinfo");
+            info->info.size = get_sh_size(info, ".modinfo");
+
+            info->info.name = get_modinfo(info, "name");
+            if (!info->info.name) info->info.name = "unknown.ko";
+            info->info.version = get_modinfo(info, "version");
+            if (!info->info.version) info->info.version = "0.0.0";
+            info->info.license = get_modinfo(info, "license");
+            if (!info->info.license) info->info.license = "unknown";
+            info->info.author = get_modinfo(info, "author");
+            if (!info->info.author) info->info.author = "unknown";
+            info->info.description = get_modinfo(info, "description");
+            if (!info->info.description) info->info.description = "loaded from .ko";
+        } else {
+            info->index.info = 0;
+            info->info.name = "unknown.ko";
+            info->info.version = "0.0.0";
+            info->info.license = "unknown";
+            info->info.author = "unknown";
+            info->info.description = "loaded from .ko";
         }
-        /* Mark as .ko format — will be handled in move_module */
-        info->index.info = 0;
-        info->info.name = "unknown.ko";
-        info->info.version = "0.0.0";
-        info->info.license = "unknown";
-        info->info.author = "unknown";
-        info->info.description = "loaded from .ko";
+        logkd("loading .ko: name=%s version=%s license=%s\n",
+              info->info.name, info->info.version, info->info.license);
         goto find_symtab;
     }
 
@@ -493,7 +545,9 @@ long unload_module(const char *name, void *__user reserved)
         goto out;
     }
     list_del(&mod->list);
-    rc = (*mod->exit)(reserved);
+    if (mod->exit && *mod->exit) {
+        rc = (*mod->exit)(reserved);
+    }
 
     if (mod->args) kvfree(mod->args);
     if (mod->ctl_args) kvfree(mod->ctl_args);
@@ -674,8 +728,12 @@ int get_module_info(const char *name, char *out_info, int size)
                       "author=%s\n"
                       "description=%s\n"
                       "args=%s\n",
-                      mod->info.name, mod->info.version, mod->info.license, mod->info.author, mod->info.description,
-                      mod->args);
+                      mod->info.name ?: "unknown",
+                      mod->info.version ?: "0.0.0",
+                      mod->info.license ?: "unknown",
+                      mod->info.author ?: "unknown",
+                      mod->info.description ?: "",
+                      mod->args ?: "");
 
     if (sz > 0) out_info[sz - 1] = '\0';
     logkfd("%s", out_info);
