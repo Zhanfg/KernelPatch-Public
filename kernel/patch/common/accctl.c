@@ -26,7 +26,7 @@
 #include <predata.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
-#include <linux/slab.h>
+#include <kputils.h>
 
 char all_allow_sctx[SUPERCALL_SCONTEXT_LEN] = { '\0' };
 uint32_t all_allow_sid = SECSID_NULL;
@@ -202,7 +202,7 @@ int app_profile_set(const struct app_profile *profile)
         return -ENOMEM;
     }
 
-    struct app_profile *new_profile = kvmalloc(sizeof(struct app_profile), GFP_KERNEL);
+    struct app_profile *new_profile = vmalloc(sizeof(struct app_profile));
     if (!new_profile) {
         spin_unlock(&app_profile_lock);
         return -ENOMEM;

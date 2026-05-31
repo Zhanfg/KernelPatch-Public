@@ -293,7 +293,7 @@ static long call_app_profile_get(uid_t uid, struct app_profile __user *uprofile)
 
 static long call_app_profile_list(uid_t __user *uids, int max_count)
 {
-    uid_t *buf = kvmalloc(max_count * sizeof(uid_t), GFP_KERNEL);
+    uid_t *buf = vmalloc(max_count * sizeof(uid_t));
     if (!buf) return -ENOMEM;
     int count = app_profile_list(buf, max_count);
     int rc = compat_copy_to_user(uids, buf, count * sizeof(uid_t));

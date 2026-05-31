@@ -97,7 +97,7 @@ int sepolicy_apply(const void __user *data, int data_len)
 {
     if (data_len <= 0 || data_len > 65536) return -EINVAL;
 
-    void *buf = kvmalloc(data_len, GFP_KERNEL);
+    void *buf = vmalloc(data_len);
     if (!buf) return -ENOMEM;
 
     if (compat_copy_from_user(buf, data, data_len)) {
