@@ -15,6 +15,7 @@
 #include <log.h>
 #include <linux/string.h>
 #include <linux/fs.h>
+#include <linux/err.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <uapi/asm-generic/errno.h>
