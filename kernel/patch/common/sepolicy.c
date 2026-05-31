@@ -10,10 +10,12 @@
 #include <linux/uaccess.h>
 #include <linux/string.h>
 #include <linux/slab.h>
+#include <linux/vmalloc.h>
 #include <linux/security.h>
 #include <security/selinux/include/security.h>
 #include <security/selinux/include/avc.h>
 #include <sepolicy.h>
+#include <kputils.h>
 #include <uapi/asm-generic/errno.h>
 
 struct sepolicy_cmd_hdr {

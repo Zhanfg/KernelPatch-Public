@@ -25,6 +25,7 @@
 #include <kputils.h>
 #include <linux/err.h>
 #include <linux/slab.h>
+#include <linux/vmalloc.h>
 #include <kputils.h>
 #include <predata.h>
 #include <linux/random.h>

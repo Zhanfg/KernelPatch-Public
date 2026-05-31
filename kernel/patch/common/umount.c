@@ -10,6 +10,7 @@
 #include <accctl.h>
 #include <linux/string.h>
 #include <linux/umh.h>
+#include <kputils.h>
 
 /* Paths where modules may be overlaid */
 static const char *module_mount_paths[] = {
