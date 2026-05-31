@@ -9,6 +9,9 @@
 /* Boot counter: returns 1 if safe mode should be activated */
 int kpm_safety_check_boot_count(void);
 
+/* Early boot counter (before /data mount, for embedded KPMs) */
+void kpm_safety_early_count(void);
+
 /* Confirm boot succeeded — resets counter */
 void kpm_safety_confirm_boot(void);
 void kpm_safety_confirm_boot_completed(void);

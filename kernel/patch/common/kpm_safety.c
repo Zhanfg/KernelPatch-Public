@@ -136,26 +136,61 @@ static void append_file_string(const char *path, const char *str)
 /* ============================================================
  * 1. Boot Counter
  *
- * - Incremented at module_init() (early boot)
- * - Reset to 0 when boot_completed is confirmed
- * - If counter >= BOOT_COUNT_MAX, enable safe mode
+ * TWO-TIER approach:
+ * - /dev/.kp_bootcount: available early (tmpfs), survives warm reboots
+ * - /data/adb/kp-next/boot_count: persistent, available after /data mount
+ *
+ * For embedded KPMs (loaded before /data mount):
+ *   Use /dev/.kp_bootcount — incremented at module_init()
+ *
+ * For filesystem KPMs (loaded after /data mount):
+ *   Use /data/adb/kp-next/boot_count — incremented at first load
+ *
+ * Both reset to 0 when boot_completed is confirmed.
  * ============================================================ */
+
+#define EARLY_BOOT_COUNT_FILE "/dev/.kp_bootcount"
+#define MAX_BOOT_COUNT 3
 
 static int boot_count = 0;
 
 int kpm_safety_check_boot_count(void)
 {
+    /* Try persistent count first (/data mount) */
     boot_count = read_file_int(BOOT_COUNT_FILE, 0);
+
+    /* Also check early count (/dev tmpfs) — survives warm reboot */
+    int early_count = read_file_int(EARLY_BOOT_COUNT_FILE, 0);
+    if (early_count > boot_count) {
+        boot_count = early_count;
+    }
+
     boot_count++;
     write_file_int(BOOT_COUNT_FILE, boot_count);
+    write_file_int(EARLY_BOOT_COUNT_FILE, boot_count);
 
-    log_boot("kpm_safety: boot count = %d (max %d)\n", boot_count, BOOT_COUNT_MAX);
+    log_boot("kpm_safety: boot count = %d (max %d)\n", boot_count, MAX_BOOT_COUNT);
 
-    if (boot_count >= BOOT_COUNT_MAX) {
+    if (boot_count >= MAX_BOOT_COUNT) {
         log_boot("kpm_safety: SAFE MODE — too many failed boots (%d)\n", boot_count);
         return 1; /* safe mode */
     }
     return 0; /* normal */
+}
+
+/* Increment early boot counter (called before /data mount) */
+void kpm_safety_early_count(void)
+{
+    int count = read_file_int(EARLY_BOOT_COUNT_FILE, 0);
+    count++;
+    write_file_int(EARLY_BOOT_COUNT_FILE, count);
+    log_boot("kpm_safety: early boot count = %d\n", count);
+
+    if (count >= MAX_BOOT_COUNT) {
+        extern int kp_safe_mode;
+        kp_safe_mode = 1;
+        log_boot("kpm_safety: EARLY SAFE MODE — count=%d\n", count);
+    }
 }
 
 void kpm_safety_confirm_boot(void)
@@ -280,11 +315,12 @@ void kpm_safety_mark_loading(const char *kpm_name)
 
 void kpm_safety_confirm_boot_completed(void)
 {
-    /* Clear all safety markers */
+    /* Clear ALL safety markers */
     write_file_int(BOOT_COUNT_FILE, 0);
+    write_file_int(EARLY_BOOT_COUNT_FILE, 0);
     write_file_string(LAST_KPM_FILE, "");
     /* Don't clear explicit blacklist — user manages that */
-    log_boot("kpm_safety: boot completed, safety markers cleared\n");
+    log_boot("kpm_safety: boot completed, all safety markers cleared\n");
 }
 
 void kpm_safety_add_to_blacklist(const char *kpm_name)

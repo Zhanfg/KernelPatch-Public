@@ -767,7 +767,10 @@ void module_init()
 
     kpm_safety_init();
 
-    /* Boot counter: if too many failed boots, activate safe mode */
+    /* Early boot counter (before /data mount) — protects embedded KPMs */
+    kpm_safety_early_count();
+
+    /* Full boot counter check (after /data mount available) */
     if (kpm_safety_check_boot_count()) {
         extern int kp_safe_mode;
         kp_safe_mode = 1;
