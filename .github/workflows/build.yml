@@ -1,29 +1,17 @@
 name: Build
 
 on:
-  push:
-    branches: [main]
-    paths: ['kernel/**', 'version', 'tests/**']
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., 0.13.4)'
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
-  test:
-    name: KPM Validation
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v6
-
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: 'lts/*'
-
-    - name: Validate test KPM files
-      run: node tests/validate_kpm.js
-
   build:
     runs-on: ubuntu-latest
     steps:
@@ -31,17 +19,6 @@ jobs:
       with:
         submodules: recursive
         fetch-depth: 0
-
-    - name: Generate version
-      id: version
-      run: |
-        MAJOR=$(grep '#define MAJOR' version | awk '{print $3}')
-        MINOR=$(grep '#define MINOR' version | awk '{print $3}')
-        PATCH=$(grep '#define PATCH' version | awk '{print $3}')
-        COMMIT_COUNT=$(git rev-list --count HEAD)
-        COMMIT_HASH=$(git rev-parse --short HEAD)
-        VERSION="${MAJOR}.${MINOR}.${PATCH}-${COMMIT_COUNT}-${COMMIT_HASH}"
-        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
     - name: Install cross compiler
       run: |
@@ -52,20 +29,12 @@ jobs:
     - name: Build kpimg (Android)
       run: |
         export TARGET_COMPILE=${{ env.TOOLCHAIN }}
-        cd kernel
-        make ANDROID=1
-        mv kpimg kpimg-android
-        mv kpimg.elf kpimg.elf-android
-        make clean
+        cd kernel && make ANDROID=1 && mv kpimg kpimg-android && mv kpimg.elf kpimg.elf-android && make clean
 
     - name: Build kpimg (Linux)
       run: |
         export TARGET_COMPILE=${{ env.TOOLCHAIN }}
-        cd kernel
-        make
-        mv kpimg kpimg-linux
-        mv kpimg.elf kpimg.elf-linux
-        make clean
+        cd kernel && make && mv kpimg kpimg-linux && mv kpimg.elf kpimg.elf-linux && make clean
 
     - name: Setup Android NDK
       uses: nttld/setup-ndk@v1
@@ -78,13 +47,9 @@ jobs:
       run: |
         export TARGET_COMPILE=placeholder
         cd kernel && make hdr && cd ..
-        cd tools
-        mkdir -p build/android && cd build/android
-        cmake \
-          -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DANDROID_PLATFORM=android-33 \
-          -DANDROID_ABI=arm64-v8a ../..
+        cd tools && mkdir -p build/android && cd build/android
+        cmake -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
+          -DCMAKE_BUILD_TYPE=Release -DANDROID_PLATFORM=android-33 -DANDROID_ABI=arm64-v8a ../..
         cmake --build .
         ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip kptools
         mv kptools kptools-android
@@ -93,10 +58,7 @@ jobs:
       run: |
         export TARGET_COMPILE=placeholder
         cd kernel && make hdr && cd ..
-        cd tools
-        mkdir -p build && cd build
-        cmake ..
-        make
+        cd tools && mkdir -p build && cd build && cmake .. && make
         mv kptools kptools-linux
 
     - name: Package kpuser
@@ -105,19 +67,11 @@ jobs:
         cd kernel && make hdr && cd ..
         zip -r kpuser.zip user
 
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v6
-      with:
-        name: KernelPatch-${{ steps.version.outputs.VERSION }}
-        path: |
-          kernel/kpimg-android
-          kernel/kpimg-linux
-
     - name: Create release
       uses: ncipollo/release-action@v1
       with:
-        tag: ${{ steps.version.outputs.VERSION }}
-        name: KernelPatch ${{ steps.version.outputs.VERSION }}
+        tag: ${{ inputs.version }}
+        name: "KernelPatch ${{ inputs.version }}"
         artifacts: |
           kernel/kpimg-android
           kernel/kpimg-linux
@@ -127,12 +81,6 @@ jobs:
         generateReleaseNotes: true
         allowUpdates: true
         replacesArtifacts: true
-        prerelease: true
         body: |
-          KernelPatch with KSU features ported:
-          - App Profile system (per-app root/non-root profiles)
-          - SELinux policy operations
-          - Non-root module umount
-          - Safe mode support
-
-          Based on upstream bmax121/KernelPatch.
+          KernelPatch with KSU features — stable release.
+          See [CHANGELOG](https://github.com/Zhanfg/KernelPatch-Public/blob/main/CHANGELOG.md) for details.
