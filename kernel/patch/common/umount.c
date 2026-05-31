@@ -15,10 +15,6 @@
 #include <linux/spinlock.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
-#include <linux/path.h>
-#include <linux/namei.h>
-#include <linux/mount.h>
-#include <linux/version.h>
 #include <kallsyms.h>
 #include <kputils.h>
 #include <accctl.h>
@@ -62,23 +58,12 @@ static umount_fn_t resolve_umount(void)
 
 static void try_umount_one(const char *mnt, int flags)
 {
-    struct path path;
-    int err = kern_path(mnt, 0, &path);
-    if (err) return;
-
-    /* Only unmount if it's a root mountpoint (not already unmounted) */
-    if (path.dentry != path.mnt->mnt_root) {
-        path_put(&path);
-        return;
-    }
-    path_put(&path);
-
     umount_fn_t umount_fn = resolve_umount();
     if (!umount_fn) return;
 
     /* Use MNT_DETACH (lazy) by default for safety */
     int use_flags = (flags > 0) ? flags : 2; /* MNT_DETACH */
-    err = umount_fn((const char __user *)mnt, use_flags);
+    int err = umount_fn((const char __user *)mnt, use_flags);
     if (err == 0) {
         logkfi("umount: detached %s\n", mnt);
     }
