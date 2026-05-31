@@ -34,6 +34,7 @@
 #include <kstorage.h>
 #include <uapi/app_profile.h>
 #include <sepolicy.h>
+#include <uapi/kpm_event.h>
 #ifdef ANDROID
 #include <userd.h>
 #endif
@@ -310,6 +311,18 @@ static long call_set_safemode(int mode)
     return 0;
 }
 
+/* KPM event trigger */
+static long call_kpm_event(int event, const char __user *usource, const char __user *uargs)
+{
+    char source[128] = { 0 };
+    char args[1024] = { 0 };
+    if (usource) compat_strncpy_from_user(source, usource, sizeof(source));
+    if (uargs) compat_strncpy_from_user(args, uargs, sizeof(args));
+    return module_dispatch_event((enum kpm_event)event,
+                                 source[0] ? source : NULL,
+                                 args[0] ? args : NULL);
+}
+
 static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, long arg4)
 {
     switch (cmd) {
@@ -426,6 +439,10 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
         return call_kpm_list((char *__user)arg1, (int)arg2);
     case SUPERCALL_KPM_INFO:
         return call_kpm_info((const char *__user)arg1, (char *__user)arg2, (int)arg3);
+
+    /* KPM event dispatch (authed) */
+    case SUPERCALL_KPM_EVENT:
+        return call_kpm_event((int)arg1, (const char __user *)arg2, (const char __user *)arg3);
 
     /* SELinux policy operations (authed only) */
     case SUPERCALL_SEPOLICY_CMD:

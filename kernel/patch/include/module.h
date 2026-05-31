@@ -8,6 +8,7 @@
 
 #include <asm-generic/module.h>
 #include <kpmodule.h>
+#include <uapi/kpm_event.h>
 
 struct load_info
 {
@@ -41,6 +42,7 @@ struct module
     mod_ctl0call_t *ctl0;
     mod_ctl1call_t *ctl1;
     mod_exitcall_t *exit;
+    mod_eventcall_t *event;  /* structured event callback (optional) */
 
     unsigned int size;
     unsigned int text_size;
@@ -61,5 +63,11 @@ struct module *find_module(const char *name);
 int get_module_nums();
 int list_modules(char *out_names, int size);
 int get_module_info(const char *name, char *out_info, int size);
+
+/* Event dispatch — forwards event to all loaded KPM modules */
+int module_dispatch_event(enum kpm_event event, const char *source_name, const char *args);
+
+/* Compact symbol resolver init */
+void compact_init(void);
 
 #endif

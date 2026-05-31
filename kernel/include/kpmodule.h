@@ -29,6 +29,10 @@ typedef long (*mod_ctl0call_t)(const char *ctl_args, char *__user out_msg, int o
 typedef long (*mod_ctl1call_t)(void *a1, void *a2, void *a3);
 typedef long (*mod_exitcall_t)(void *reserved);
 
+/* Event callback — receives structured event data */
+struct kpm_event_data;
+typedef long (*mod_eventcall_t)(const struct kpm_event_data *data);
+
 #define KPM_INIT(fn) \
     static mod_initcall_t __kpm_initcall_##fn __attribute__((__used__)) __attribute__((__section__(".kpm.init"))) = fn
 
@@ -40,5 +44,9 @@ typedef long (*mod_exitcall_t)(void *reserved);
 
 #define KPM_EXIT(fn) \
     static mod_exitcall_t __kpm_exitcall_##fn __attribute__((__used__)) __attribute__((__section__(".kpm.exit"))) = fn
+
+/* Register structured event callback (optional, new in this fork) */
+#define KPM_EVENT(fn) \
+    static mod_eventcall_t __kpm_eventcall_##fn __attribute__((__used__)) __attribute__((__section__(".kpm.event"))) = fn
 
 #endif

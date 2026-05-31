@@ -123,6 +123,9 @@ struct su_profile
 /* Safe mode */
 #define SUPERCALL_SET_SAFEMODE     0x1140  /* arg1: int (0 or 1) */
 
+/* KPM event dispatch */
+#define SUPERCALL_KPM_EVENT        0x1150  /* arg1: event enum, arg2: source_name, arg3: args */
+
 #define SUPERCALL_MAX 0x1200
 
 #define SUPERCALL_RES_SUCCEED 0

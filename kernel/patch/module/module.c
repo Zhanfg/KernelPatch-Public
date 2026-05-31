@@ -25,6 +25,7 @@
 
 #include "module.h"
 #include "relo.h"
+#include <compact.h>
 
 #define SZ_128M 0x08000000
 
@@ -182,8 +183,8 @@ static int simplify_symbols(struct module *mod, const struct load_info *info)
             break;
         case SHN_UNDEF:
             unsigned long addr = symbol_lookup_name(name);
-            // kernel symbol cause overflow in relocation
-            // if (!addr) addr = kallsyms_lookup_name(name);
+            /* Fallback: try compact resolver (exposes kernel + KP symbols to KPM) */
+            if (!addr) addr = compact_find_symbol(name);
             if (!addr) {
                 logke("unknown symbol: %s\n", name);
                 ret = -ENOENT;
@@ -295,11 +296,17 @@ static int move_module(struct module *mod, struct load_info *info)
         shdr->sh_addr = (unsigned long)dest;
 
         if (!mod->init && !strcmp(".kpm.init", sname)) mod->init = (mod_initcall_t *)dest;
+        /* .ko format: accept standard .init.text/.exit.text */
+        if (!mod->init && !strcmp(".init.text", sname)) mod->init = (mod_initcall_t *)dest;
 
         if (!strcmp(".kpm.ctl0", sname)) mod->ctl0 = (mod_ctl0call_t *)dest;
         if (!strcmp(".kpm.ctl1", sname)) mod->ctl1 = (mod_ctl1call_t *)dest;
 
         if (!mod->exit && !strcmp(".kpm.exit", sname)) mod->exit = (mod_exitcall_t *)dest;
+        /* .ko format: accept standard .exit.text */
+        if (!mod->exit && !strcmp(".exit.text", sname)) mod->exit = (mod_exitcall_t *)dest;
+
+        if (!mod->event && !strcmp(".kpm.event", sname)) mod->event = (mod_eventcall_t *)dest;
 
         if (!mod->info.base && !strcmp(".kpm.info", sname)) mod->info.base = (const char *)dest;
     }
@@ -325,14 +332,30 @@ static int setup_load_info(struct load_info *info)
     }
 
     if (!find_sec(info, ".kpm.init") || !find_sec(info, ".kpm.exit")) {
-        logke("no .kpm.init or .kpm.exit section\n");
-        return -ENOEXEC;
+        /* For .ko files, accept standard .init.text/.exit.text sections */
+        if (!find_sec(info, ".init.text") || !find_sec(info, ".exit.text")) {
+            logke("no .kpm.init/.kpm.exit or .init.text/.exit.text section\n");
+            return -ENOEXEC;
+        }
+        /* Mark as .ko format — will be handled in move_module */
+        info->index.info = 0;
+        info->info.name = "unknown.ko";
+        info->info.version = "0.0.0";
+        info->info.license = "unknown";
+        info->info.author = "unknown";
+        info->info.description = "loaded from .ko";
+        goto find_symtab;
     }
 
     info->index.info = find_sec(info, ".kpm.info");
     if (!info->index.info) {
-        logke("no .kpm.info section\n");
-        return -ENOEXEC;
+        /* .o file without .kpm.info — auto-generate metadata */
+        info->info.name = "unknown.o";
+        info->info.version = "0.0.0";
+        info->info.license = "unknown";
+        info->info.author = "unknown";
+        info->info.description = "loaded from .o";
+        goto find_symtab;
     }
     info->info.base = get_sh_base(info, ".kpm.info");
     info->info.size = get_sh_size(info, ".kpm.info");
@@ -364,6 +387,8 @@ static int setup_load_info(struct load_info *info)
     const char *description = get_modinfo(info, "description");
     info->info.description = description;
     logkd("    description: %s\n", description);
+
+find_symtab:
 
     for (int i = 1; i < info->hdr->e_shnum; i++) {
         if (info->sechdrs[i].sh_type == SHT_SYMTAB) {
@@ -662,4 +687,36 @@ void module_init()
 {
     INIT_LIST_HEAD(&modules.list);
     spin_lock_init(&module_lock);
+    compact_init();
+}
+
+int module_dispatch_event(enum kpm_event event, const char *source_name, const char *args)
+{
+    if (event <= KPM_EVENT_NONE || event >= KPM_EVENT_MAX) return -EINVAL;
+
+    struct kpm_event_data data = {
+        .event = event,
+        .source_name = source_name,
+        .args = args,
+        .reserved = NULL,
+    };
+
+    int count = 0;
+    rcu_read_lock();
+    struct module *pos;
+    list_for_each_entry(pos, &modules.list, list) {
+        if (pos->event && *pos->event) {
+            long rc = (*pos->event)(&data);
+            logkfi("event %d -> module %s: rc=%ld\n", event, pos->info.name, rc);
+            count++;
+        }
+        /* Backward compat: also call init with event string for old modules */
+        if (pos->init && *pos->init && event == KPM_EVENT_POST_FS_DATA) {
+            /* Old modules already got event via init(args, "load-file") */
+        }
+    }
+    rcu_read_unlock();
+
+    logkfi("dispatched event %d to %d modules\n", event, count);
+    return count;
 }
