@@ -26,6 +26,7 @@
 #include "module.h"
 #include "relo.h"
 #include <compact.h>
+#include <selinux_hide.h>
 
 #define SZ_128M 0x08000000
 
@@ -689,6 +690,7 @@ void module_init()
     spin_lock_init(&module_lock);
     compact_init();
     umount_init();
+    selinux_hide_init();
 }
 
 int module_dispatch_event(enum kpm_event event, const char *source_name, const char *args)
