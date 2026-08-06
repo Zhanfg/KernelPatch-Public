@@ -9,7 +9,7 @@ on:
   push:
     branches:
       - main
-      - restart/linker-layout-audit
+      - 'restart/**'
   workflow_dispatch:
 
 env:
