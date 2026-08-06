@@ -1,0 +1,108 @@
+name: Apply compiler warning cleanup
+
+on:
+  push:
+    branches:
+      - restart/compiler-warning-cleanup
+    paths:
+      - .github/workflows/apply-warning-cleanup.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: restart/compiler-warning-cleanup
+
+      - name: Apply source fixes
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new):
+              file = Path(path)
+              text = file.read_text(encoding='utf-8')
+              if old not in text:
+                  raise SystemExit(f'anchor not found in {path}: {old!r}')
+              file.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          replace(
+              'kernel/patch/common/sucompat.c',
+              '#include <accctl.h>\n',
+              '#include <accctl.h>\n#include <userd.h>\n',
+          )
+
+          replace(
+              'kernel/patch/common/supercmd.c',
+              '#ifdef ANDROID\n#include <userd.h>\n#endif\n',
+              '#include <userd.h>\n',
+          )
+
+          replace(
+              'kernel/patch/module/module.c',
+              '#include <kpm_safety.h>\n',
+              '#include <kpm_safety.h>\n#include <accctl.h>\n',
+          )
+
+          replace(
+              'kernel/patch/common/supercall.c',
+              '''    int rc = compat_copy_to_user(uids, buf, count * sizeof(uid_t));
+              kvfree(buf);
+              return count;
+              ''',
+              '''    int rc = compat_copy_to_user(uids, buf, count * sizeof(uid_t));
+              kvfree(buf);
+              if (rc) return -EFAULT;
+              return count;
+              ''',
+          )
+
+          replace(
+              'tools/kallsym.c',
+              'tools_logi("kernel base address: 0x%08llx\\n", info->kernel_base);',
+              'tools_logi("kernel base address: 0x%08" PRIx64 "\\n", info->kernel_base);',
+          )
+          replace(
+              'tools/kallsym.c',
+              'tools_logi("kernel base address: 0x%llx\\n", info->kernel_base);',
+              'tools_logi("kernel base address: 0x%" PRIx64 "\\n", info->kernel_base);',
+          )
+
+          replace(
+              'kernel/Makefile',
+              'CFLAGS += -g\n',
+              'CFLAGS += -g\nCFLAGS += $(EXTRA_CFLAGS)\n',
+          )
+
+          replace(
+              'tools/CMakeLists.txt',
+              'cmake_minimum_required(VERSION 3.5)',
+              'cmake_minimum_required(VERSION 3.10)',
+          )
+          replace(
+              'tools/CMakeLists.txt',
+              'target_compile_definitions(kptools PRIVATE BZ_NO_STDIO)\n',
+              'target_compile_definitions(kptools PRIVATE BZ_NO_STDIO)\n'
+              'target_compile_options(kptools PRIVATE -Wall -Wextra -Werror=format)\n',
+          )
+          PY
+
+      - name: Remove temporary diagnostics
+        run: |
+          rm -f .github/workflows/diagnose-warnings.yml
+          rm -f .github/workflows/apply-warning-cleanup.yml
+
+      - name: Commit fixes
+        run: |
+          set -euo pipefail
+          git config user.name kernelpatch-cleanup-bot
+          git config user.email kernelpatch-cleanup-bot@users.noreply.github.com
+          git add kernel tools .github/workflows
+          git commit -m "fix(build): resolve actionable compiler warnings"
+          git push origin HEAD:restart/compiler-warning-cleanup
