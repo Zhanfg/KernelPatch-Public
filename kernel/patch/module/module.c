@@ -29,6 +29,7 @@
 #include <selinux_hide.h>
 #include <proc_hide.h>
 #include <kpm_safety.h>
+#include <accctl.h>
 
 #define SZ_128M 0x08000000
 

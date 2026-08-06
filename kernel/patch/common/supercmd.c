@@ -17,9 +17,7 @@
 #include <module.h>
 #include <user_event.h>
 #include <log.h>
-#ifdef ANDROID
 #include <userd.h>
-#endif
 
 static char *__user supercmd_str_to_user_sp(const char *data, uintptr_t *sp)
 {

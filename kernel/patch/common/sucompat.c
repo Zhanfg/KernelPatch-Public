@@ -20,6 +20,7 @@
 #include <kputils.h>
 #include <linux/ptrace.h>
 #include <accctl.h>
+#include <userd.h>
 #include <linux/string.h>
 #include <linux/err.h>
 #include <uapi/asm-generic/errno.h>
