@@ -2,7 +2,7 @@ OUTPUT_ARCH(aarch64)
 
 _link_base = 64k - 3 * 4k;
 
-SECTIONS 
+SECTIONS
 {
     /DISCARD/ : { *(.discard) *(.discard.*) }
     /DISCARD/ : {
@@ -20,7 +20,7 @@ SECTIONS
         base/setup.o(.setup.data)
         . = _setup_start + 4K;
     }
-    
+
     .setup.text : {
         base/setup1.o(.entry.text)
         base/setup1.o(.text)
@@ -29,16 +29,21 @@ SECTIONS
     }
 
     . = ALIGN(16);
-    .setup.map : {
+    .setup.map.data : {
         _map_start = .;
         base/map.o(.map.data)
+    }
+    .setup.map.text : {
         base/map.o(.map.text)
         base/map.o(.text)
         base/map1.o(.text)
         . = ALIGN(16);
         _map_end = .;
     }
-    ASSERT(SIZEOF(.setup.map) < 0xa00, "Size too large of .setup.map!")
+    ASSERT(
+        SIZEOF(.setup.map.data) + SIZEOF(.setup.map.text) < 0xa00,
+        "Combined size too large for setup map region!"
+    )
 
     . = ALIGN(64K);
     _kp_start = .;
@@ -47,7 +52,7 @@ SECTIONS
 
         base/start.o(.start.text)
         base/start.o(.text)
-        
+
         base/hook.o(.transit0.text);
         _transit0_end = .;
         base/hook.o(.transit4.text);
@@ -104,18 +109,17 @@ SECTIONS
         *(.got)
     }
     ASSERT(SIZEOF(.got) == 0, "Unexpected GOT detected!")
-    
+
     .plt : {
         *(.plt) *(.plt.*) *(.iplt) *(.igot .igot.plt)
     }
     ASSERT(SIZEOF(.plt) == 0, "Unexpected run-time procedure linkages detected!")
 
-
-    .data.rel.ro : { 
-        *(.data.rel.ro) 
+    .data.rel.ro : {
+        *(.data.rel.ro)
     }
     ASSERT(SIZEOF(.data.rel.ro) == 0, "Unexpected RELRO detected!")
-    
+
     .rela.dyn : {
         *(.rela .rela*)
     }
