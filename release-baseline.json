@@ -2,14 +2,26 @@
   "releaseTag": "0.13.3",
   "releaseCommit": "e26a2e14e3b8d60a19dd3c7f354a777faa574f4f",
   "sourceVersion": "0.13.2",
-  "status": "legacy-version-mismatch",
+  "status": "legacy-version-mismatch-reproducible",
+  "reproducibility": {
+    "verifiedAt": "2026-08-06",
+    "compileTimestamp": "10:33:25 May 31 2026",
+    "sourceDateEpoch": 1780223605,
+    "armToolchain": {
+      "name": "arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf",
+      "sha256": "62d66e0ad7bd7f2a183d236ee301a5c73c737c886c7944aa4f39415aab528daf"
+    },
+    "androidNdk": "r26b",
+    "kpimgLinuxByteIdentical": true,
+    "kptoolsAndroidByteIdentical": true
+  },
   "consumedAssets": {
     "kpimg-linux": {
-      "sha256": "7b8cf7e97169d2d73b2e11653ad5bdbc6fc6251c5507b8d108f4a2e0bcd76f"
+      "sha256": "7b8cf7e97169d2d73bba2e11653ad5bdbc6fc6251c5507b8d108f4a2e0bcd76f"
     },
     "kptools-android": {
       "sha256": "ebf9b8eb17b4b3a6b1d4959402033bb1c6c4044d0e2532d480c34d1f412d5225"
     }
   },
-  "notes": "The historical release tag is 0.13.3, but the version header at the tagged commit declares 0.13.2. The release remains a legacy dependency only; new publishing is blocked until a corrected version is built and device-tested."
+  "notes": "The historical release tag is 0.13.3, while the tagged source declares 0.13.2. Both consumed assets are byte-for-byte reproducible when the pinned toolchains and the embedded legacy compile timestamp are restored. The release remains immutable and no new publishing is permitted until the source version and compiler warnings are corrected and device-tested."
 }
