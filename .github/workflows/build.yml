@@ -38,7 +38,9 @@ jobs:
           status=$(jq -r '.status' release-baseline.json)
           test "$tag" = "$LEGACY_TAG"
           test "$commit" = "$LEGACY_COMMIT"
-          test "$status" = legacy-version-mismatch
+          test "$status" = legacy-version-mismatch-reproducible
+          test "$(jq -r '.reproducibility.kpimgLinuxByteIdentical' release-baseline.json)" = true
+          test "$(jq -r '.reproducibility.kptoolsAndroidByteIdentical' release-baseline.json)" = true
 
           declared=$(awk '/#define MAJOR/{a=$3} /#define MINOR/{b=$3} /#define PATCH/{c=$3} END{print a "." b "." c}' version)
           test "$declared" = "$source_version"
