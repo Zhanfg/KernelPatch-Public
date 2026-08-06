@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.10)
 project (kptools)
 
 file(GLOB_RECURSE LIB_SOURCES "lib/*.c")
@@ -35,6 +35,7 @@ list(REMOVE_DUPLICATES LIB_INCLUDE_DIRS)
 
 target_include_directories(kptools PRIVATE ${LIB_INCLUDE_DIRS})
 target_compile_definitions(kptools PRIVATE BZ_NO_STDIO)
+target_compile_options(kptools PRIVATE -Wall -Wextra -Werror=format)
 find_package(ZLIB REQUIRED)
 target_include_directories(kptools PRIVATE ${ZLIB_INCLUDE_DIRS})
 

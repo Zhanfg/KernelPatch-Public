@@ -302,6 +302,7 @@ static long call_app_profile_list(uid_t __user *uids, int max_count)
     int count = app_profile_list(buf, max_count);
     int rc = compat_copy_to_user(uids, buf, count * sizeof(uid_t));
     kvfree(buf);
+    if (rc) return -EFAULT;
     return count;
 }
 

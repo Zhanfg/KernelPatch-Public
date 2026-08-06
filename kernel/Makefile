@@ -11,6 +11,7 @@ OBJCOPY = $(TARGET_COMPILE)objcopy
 
 CFLAGS += -Wall -fno-builtin -std=gnu11 -nostdinc -mgeneral-regs-only
 CFLAGS += -g
+CFLAGS += $(EXTRA_CFLAGS)
 
 ifdef DEBUG
 	CFLAGS += -DDEBUG -DMAP_DEBUG -g
