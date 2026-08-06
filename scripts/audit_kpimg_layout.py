@@ -6,9 +6,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -36,15 +39,32 @@ SECTIONS = (
     ".kp.data",
 )
 
+SPLIT_BASELINE_COMMIT = "b2270f7bd3d186b6960e44d87a5885ab11bf7c41"
+SPLIT_BRANCH = "restart/setup-map-split-audit"
+STRICT_FLAGS = (
+    "-Werror=implicit-function-declaration "
+    "-Werror=unused-variable "
+    "-Werror=int-conversion"
+)
 
-def command(args: list[str]) -> str:
-    return subprocess.run(
+
+def execute(
+    args: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    capture: bool = True,
+) -> str:
+    result = subprocess.run(
         args,
+        cwd=cwd,
+        env=env,
         check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
         text=True,
-    ).stdout
+    )
+    return result.stdout if capture else ""
 
 
 def parse_symbols(text: str) -> dict[str, int]:
@@ -115,6 +135,92 @@ def hx(value: int) -> str:
     return f"0x{value:x}"
 
 
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def split_experiment_enabled() -> bool:
+    return (
+        os.environ.get("GITHUB_HEAD_REF") == SPLIT_BRANCH
+        or os.environ.get("GITHUB_REF_NAME") == SPLIT_BRANCH
+    )
+
+
+def build_kernel(root: Path, prefix: str, epoch: str) -> None:
+    env = os.environ.copy()
+    env.update(
+        {
+            "TARGET_COMPILE": prefix,
+            "SOURCE_DATE_EPOCH": epoch,
+            "EXTRA_CFLAGS": STRICT_FLAGS,
+        }
+    )
+    execute(["make", "-C", "kernel", "clean"], cwd=root, env=env, capture=False)
+    execute(["make", "-C", "kernel"], cwd=root, env=env, capture=False)
+
+
+def compare_split_baseline(args: argparse.Namespace) -> dict[str, Any] | None:
+    if not split_experiment_enabled():
+        return None
+
+    repo = Path.cwd().resolve()
+    toolchain_prefix = args.readelf
+    if not toolchain_prefix.endswith("readelf"):
+        raise SystemExit("cannot derive cross-toolchain prefix from --readelf")
+    toolchain_prefix = toolchain_prefix[: -len("readelf")]
+
+    epoch = execute(
+        ["git", "show", "-s", "--format=%ct", SPLIT_BASELINE_COMMIT],
+        cwd=repo,
+    ).strip()
+    temp_root = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir()))
+    worktree = temp_root / f"kpimg-layout-baseline-{os.getpid()}"
+    if worktree.exists():
+        shutil.rmtree(worktree)
+
+    try:
+        execute(
+            ["git", "worktree", "add", "--detach", str(worktree), SPLIT_BASELINE_COMMIT],
+            cwd=repo,
+            capture=False,
+        )
+        build_kernel(worktree, toolchain_prefix, epoch)
+        baseline_raw = worktree / "kernel" / "kpimg"
+        baseline_elf = worktree / "kernel" / "kpimg.elf"
+        baseline_symbols = parse_symbols(
+            execute([f"{toolchain_prefix}nm", "-n", str(baseline_elf)])
+        )
+
+        # Rebuild the candidate with the exact same compiler timestamp and flags.
+        build_kernel(repo, toolchain_prefix, epoch)
+        candidate_raw = Path(args.raw)
+        candidate_elf = Path(args.elf)
+        candidate_symbols = parse_symbols(
+            execute([f"{toolchain_prefix}nm", "-n", str(candidate_elf)])
+        )
+
+        baseline_bytes = baseline_raw.read_bytes()
+        candidate_bytes = candidate_raw.read_bytes()
+        return {
+            "baseline_commit": SPLIT_BASELINE_COMMIT,
+            "source_date_epoch": int(epoch),
+            "baseline_sha256": hashlib.sha256(baseline_bytes).hexdigest(),
+            "candidate_sha256": hashlib.sha256(candidate_bytes).hexdigest(),
+            "raw_byte_identical": baseline_bytes == candidate_bytes,
+            "required_symbols_identical": baseline_symbols == candidate_symbols,
+            "baseline_symbols": baseline_symbols,
+            "candidate_symbols": candidate_symbols,
+        }
+    finally:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree)],
+            cwd=repo,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+
 def render(report: dict[str, Any]) -> str:
     lines = [
         "# kpimg linker-layout audit",
@@ -129,12 +235,33 @@ def render(report: dict[str, Any]) -> str:
         f"- File-backed end: `{hx(report['derived']['file_backed_end'])}`",
         f"- Aligned link end: `{hx(report['derived']['aligned_link_end'])}`",
         f"- Address-only trailing alignment: `{hx(report['derived']['trailing_virtual_padding'])}`",
-        "",
-        "## Symbols",
-        "",
-        "| Symbol | Address | Raw offset |",
-        "|---|---:|---:|",
     ]
+
+    comparison = report.get("comparison")
+    if comparison:
+        lines.extend(
+            [
+                "",
+                "## Pre-split comparison",
+                "",
+                f"- Baseline commit: `{comparison['baseline_commit']}`",
+                f"- Shared SOURCE_DATE_EPOCH: `{comparison['source_date_epoch']}`",
+                f"- Baseline SHA-256: `{comparison['baseline_sha256']}`",
+                f"- Candidate SHA-256: `{comparison['candidate_sha256']}`",
+                f"- Raw byte-identical: `{comparison['raw_byte_identical']}`",
+                f"- Required symbols identical: `{comparison['required_symbols_identical']}`",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Symbols",
+            "",
+            "| Symbol | Address | Raw offset |",
+            "|---|---:|---:|",
+        ]
+    )
 
     base = report["symbols"].get("_link_base", 0)
     for name in SYMBOLS:
@@ -205,9 +332,11 @@ def main() -> int:
         if not path.is_file() or path.stat().st_size == 0:
             raise SystemExit(f"missing or empty input: {path}")
 
-    symbols = parse_symbols(command([args.nm, "-n", str(args.elf)]))
-    sections = parse_sections(command([args.readelf, "-SW", str(args.elf)]))
-    loads = parse_loads(command([args.readelf, "-lW", str(args.elf)]))
+    comparison = compare_split_baseline(args)
+
+    symbols = parse_symbols(execute([args.nm, "-n", str(args.elf)]))
+    sections = parse_sections(execute([args.readelf, "-SW", str(args.elf)]))
+    loads = parse_loads(execute([args.readelf, "-lW", str(args.elf)]))
     raw = args.raw.read_bytes()
 
     missing_symbols = sorted(set(SYMBOLS) - symbols.keys())
@@ -224,6 +353,12 @@ def main() -> int:
         "all_required_symbols_present": not missing_symbols,
         "all_required_sections_present": not missing_sections,
     }
+
+    if comparison:
+        checks["pre_split_raw_byte_identical"] = comparison["raw_byte_identical"]
+        checks["pre_split_required_symbols_identical"] = comparison[
+            "required_symbols_identical"
+        ]
 
     if not missing_symbols:
         checks.update(
@@ -302,7 +437,7 @@ def main() -> int:
         "raw": {
             "path": str(args.raw),
             "size": raw_size,
-            "sha256": hashlib.sha256(raw).hexdigest(),
+            "sha256": sha256(args.raw),
         },
         "elf": {"path": str(args.elf)},
         "derived": {
@@ -311,6 +446,7 @@ def main() -> int:
             "aligned_link_end": link_end,
             "trailing_virtual_padding": max(link_end - file_backed_end, 0),
         },
+        "comparison": comparison,
         "symbols": symbols,
         "sections": sections,
         "load_segments": loads,
