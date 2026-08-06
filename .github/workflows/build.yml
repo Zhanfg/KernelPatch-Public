@@ -1,86 +1,171 @@
-name: Build
-
-on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Release version (e.g., 0.13.4)'
-        required: true
-        type: string
+name: Verify KernelPatch build
 
 permissions:
-  contents: write
+  contents: read
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - main
+      - restart/verify-release-provenance
+  workflow_dispatch:
+
+env:
+  LEGACY_TAG: 0.13.3
+  LEGACY_COMMIT: e26a2e14e3b8d60a19dd3c7f354a777faa574f4f
+  ARM_TOOLCHAIN_URL: https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
+  ARM_TOOLCHAIN_SHA256: 62d66e0ad7bd7f2a183d236ee301a5c73c737c886c7944aa4f39415aab528daf
+  KPIMG_LINUX_SHA256: 7b8cf7e97169d2d73bba2e11653ad5bdbc6fc6251c5507b8d108f4a2e0bcd76f
+  KPTOOLS_ANDROID_SHA256: ebf9b8eb17b4b3a6b1d4959402033bb1c6c4044d0e2532d480c34d1f412d5225
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  verify:
+    runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v6
-      with:
-        submodules: recursive
-        fetch-depth: 0
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
 
-    - name: Install cross compiler
-      run: |
-        curl -o toolchain.tar.xz https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
-        tar -xf toolchain.tar.xz
-        echo "TOOLCHAIN=$(pwd)/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf/bin/aarch64-none-elf-" >> $GITHUB_ENV
+      - name: Verify legacy release provenance record
+        run: |
+          set -euo pipefail
+          tag=$(jq -r '.releaseTag' release-baseline.json)
+          commit=$(jq -r '.releaseCommit' release-baseline.json)
+          source_version=$(jq -r '.sourceVersion' release-baseline.json)
+          status=$(jq -r '.status' release-baseline.json)
+          test "$tag" = "$LEGACY_TAG"
+          test "$commit" = "$LEGACY_COMMIT"
+          test "$status" = legacy-version-mismatch-reproducible
+          test "$(jq -r '.reproducibility.kpimgLinuxByteIdentical' release-baseline.json)" = true
+          test "$(jq -r '.reproducibility.kptoolsAndroidByteIdentical' release-baseline.json)" = true
 
-    - name: Build kpimg (Android)
-      run: |
-        export TARGET_COMPILE=${{ env.TOOLCHAIN }}
-        cd kernel && make ANDROID=1 && mv kpimg kpimg-android && mv kpimg.elf kpimg.elf-android && make clean
+          declared=$(awk '/#define MAJOR/{a=$3} /#define MINOR/{b=$3} /#define PATCH/{c=$3} END{print a "." b "." c}' version)
+          test "$declared" = "$source_version"
+          test "$declared" != "$LEGACY_TAG" || {
+            echo "::error::Baseline no longer represents the acknowledged legacy mismatch"
+            exit 1
+          }
 
-    - name: Build kpimg (Linux)
-      run: |
-        export TARGET_COMPILE=${{ env.TOOLCHAIN }}
-        cd kernel && make && mv kpimg kpimg-linux && mv kpimg.elf kpimg.elf-linux && make clean
+          git fetch --tags --force
+          resolved=$(git rev-list -n 1 "$LEGACY_TAG")
+          test "$resolved" = "$LEGACY_COMMIT" || {
+            echo "::error::Legacy tag moved: expected $LEGACY_COMMIT, got $resolved"
+            exit 1
+          }
 
-    - name: Setup Android NDK
-      uses: nttld/setup-ndk@v1
-      id: setup-ndk
-      with:
-        ndk-version: r26b
-        add-to-path: true
+      - name: Download trusted legacy assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p reference
+          gh release download "$LEGACY_TAG" \
+            -R Zhanfg/KernelPatch-Public \
+            -p kpimg-linux \
+            -p kptools-android \
+            -D reference
+          echo "$KPIMG_LINUX_SHA256  reference/kpimg-linux" | sha256sum -c -
+          echo "$KPTOOLS_ANDROID_SHA256  reference/kptools-android" | sha256sum -c -
 
-    - name: Build kptools-android
-      run: |
-        export TARGET_COMPILE=placeholder
-        cd kernel && make hdr && cd ..
-        cd tools && mkdir -p build/android && cd build/android
-        cmake -DCMAKE_TOOLCHAIN_FILE=${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake \
-          -DCMAKE_BUILD_TYPE=Release -DANDROID_PLATFORM=android-33 -DANDROID_ABI=arm64-v8a ../..
-        cmake --build .
-        ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip kptools
-        mv kptools kptools-android
+      - name: Recover deterministic compile timestamp
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import datetime
+          import os
+          import re
+          from pathlib import Path
 
-    - name: Build kptools-linux
-      run: |
-        export TARGET_COMPILE=placeholder
-        cd kernel && make hdr && cd ..
-        cd tools && mkdir -p build && cd build && cmake .. && make
-        mv kptools kptools-linux
+          data = Path('reference/kpimg-linux').read_bytes()
+          match = re.search(rb'(\d{2}:\d{2}:\d{2} [A-Z][a-z]{2} [ 0-9]\d 20\d{2})', data)
+          if not match:
+              raise SystemExit('compile timestamp not found in legacy kpimg-linux')
 
-    - name: Package kpuser
-      run: |
-        export TARGET_COMPILE=placeholder
-        cd kernel && make hdr && cd ..
-        zip -r kpuser.zip user
+          stamp = match.group(1).decode('ascii')
+          dt = datetime.datetime.strptime(stamp, '%H:%M:%S %b %d %Y').replace(
+              tzinfo=datetime.timezone.utc
+          )
+          epoch = int(dt.timestamp())
+          print(f'Legacy compile timestamp: {stamp} (SOURCE_DATE_EPOCH={epoch})')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as env:
+              env.write(f'SOURCE_DATE_EPOCH={epoch}\n')
+              env.write(f'LEGACY_COMPILE_TIME={stamp}\n')
+          PY
 
-    - name: Create release
-      uses: ncipollo/release-action@v1
-      with:
-        tag: ${{ inputs.version }}
-        name: "KernelPatch ${{ inputs.version }}"
-        artifacts: |
-          kernel/kpimg-android
-          kernel/kpimg-linux
-          tools/build/android/kptools-android
-          tools/build/kptools-linux
-          kpuser.zip
-        generateReleaseNotes: true
-        allowUpdates: true
-        replacesArtifacts: true
-        body: |
-          KernelPatch with KSU features — stable release.
-          See [CHANGELOG](https://github.com/Zhanfg/KernelPatch-Public/blob/main/CHANGELOG.md) for details.
+      - name: Download and verify Arm toolchain
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 --retry-delay 2 \
+            "$ARM_TOOLCHAIN_URL" \
+            -o arm-toolchain.tar.xz
+          actual=$(sha256sum arm-toolchain.tar.xz | awk '{print $1}')
+          echo "::notice title=Arm toolchain SHA256::$actual"
+          test "$actual" = "$ARM_TOOLCHAIN_SHA256" || {
+            echo "::error::Arm toolchain SHA256 mismatch: expected=$ARM_TOOLCHAIN_SHA256 actual=$actual"
+            exit 1
+          }
+
+      - name: Extract Arm toolchain
+        run: |
+          set -euo pipefail
+          tar -xf arm-toolchain.tar.xz
+          prefix="$PWD/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf/bin/aarch64-none-elf-"
+          test -x "${prefix}gcc"
+          echo "TOOLCHAIN=$prefix" >> "$GITHUB_ENV"
+
+      - name: Build kpimg Linux deterministically
+        run: |
+          set -euo pipefail
+          TARGET_COMPILE="$TOOLCHAIN" SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" make -C kernel clean
+          TARGET_COMPILE="$TOOLCHAIN" SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" make -C kernel
+          cp kernel/kpimg kpimg-linux
+          test -s kpimg-linux
+          actual=$(sha256sum kpimg-linux | awk '{print $1}')
+          echo "::notice title=kpimg-linux built SHA256::$actual"
+          cmp kpimg-linux reference/kpimg-linux || {
+            echo "::error::kpimg-linux still differs after restoring legacy compile timestamp $LEGACY_COMPILE_TIME"
+            exit 1
+          }
+          test "$actual" = "$KPIMG_LINUX_SHA256"
+
+      - name: Setup Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779
+        with:
+          ndk-version: r26b
+
+      - name: Build kptools Android
+        run: |
+          set -euo pipefail
+          TARGET_COMPILE=placeholder SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" make -C kernel hdr
+          cmake -S tools -B tools/build/android \
+            -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DANDROID_PLATFORM=android-33 \
+            -DANDROID_ABI=arm64-v8a
+          cmake --build tools/build/android --parallel
+          "${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" \
+            tools/build/android/kptools
+          cp tools/build/android/kptools kptools-android
+          actual=$(sha256sum kptools-android | awk '{print $1}')
+          echo "::notice title=kptools-android built SHA256::$actual"
+          cmp kptools-android reference/kptools-android || {
+            echo "::error::kptools-android is not byte-for-byte reproducible with legacy release"
+            exit 1
+          }
+          test "$actual" = "$KPTOOLS_ANDROID_SHA256"
+
+      - name: Upload verification artifacts
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: kernelpatch-verification-${{ github.sha }}
+          path: |
+            kpimg-linux
+            kptools-android
+          if-no-files-found: warn
+          retention-days: 14
