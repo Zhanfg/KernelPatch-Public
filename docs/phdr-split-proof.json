@@ -1,0 +1,36 @@
+{
+  "verifiedAt": "2026-08-06",
+  "status": "build-pass-device-blocked",
+  "baselineCommit": "0bdf0094f7c90cead5dd1a221af957ea2ed01948",
+  "experimentCommit": "c92519bdfdebee3fff653b99ab1788b130a2ec6c",
+  "sourceDateEpoch": 1786030938,
+  "baselineRawSha256": "579d38d8297497a5a8842446b94bbc90ec865490973bc45745fbc99098c01735",
+  "candidateRawSha256": "579d38d8297497a5a8842446b94bbc90ec865490973bc45745fbc99098c01735",
+  "rawByteIdentical": true,
+  "requiredSymbolsIdentical": true,
+  "rawSize": 183744,
+  "loadSegments": [
+    {"offset": 53248, "virtualAddress": 53248, "fileSize": 4096, "memorySize": 4096, "flags": "RW", "alignment": 65536, "section": ".setup.data"},
+    {"offset": 57344, "virtualAddress": 57344, "fileSize": 888, "memorySize": 888, "flags": "RE", "alignment": 65536, "section": ".setup.text"},
+    {"offset": 58240, "virtualAddress": 58240, "fileSize": 160, "memorySize": 160, "flags": "RW", "alignment": 65536, "section": ".setup.map.data"},
+    {"offset": 58400, "virtualAddress": 58400, "fileSize": 1408, "memorySize": 1408, "flags": "RE", "alignment": 65536, "section": ".setup.map.text"},
+    {"offset": 65536, "virtualAddress": 65536, "fileSize": 111728, "memorySize": 111728, "flags": "RE", "alignment": 65536, "section": ".kp.text"},
+    {"offset": 196608, "virtualAddress": 196608, "fileSize": 40384, "memorySize": 40384, "flags": "RW", "alignment": 65536, "section": ".kp.data"}
+  ],
+  "checks": {
+    "sixLoadSegments": true,
+    "noWritableExecutableLoad": true,
+    "allLoadsReadable": true,
+    "allSectionsCoveredByCompatibleLoad": true,
+    "sectionAddressesPreserved": true,
+    "legacyAssetsReproduced": true,
+    "currentStrictBuildPassed": true
+  },
+  "mergeBlockedBy": [
+    "physical-device patch/unpatch round trip",
+    "A/B and non-A/B boot validation",
+    "verified backup rollback",
+    "KPM lifecycle and reboot persistence",
+    "safe-mode and failed-boot recovery"
+  ]
+}
