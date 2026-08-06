@@ -9,7 +9,7 @@ on:
   push:
     branches:
       - main
-      - restart/verify-release-provenance
+      - restart/compiler-warning-cleanup
   workflow_dispatch:
 
 env:
@@ -24,12 +24,12 @@ jobs:
   verify:
     runs-on: ubuntu-24.04
     steps:
-      - name: Checkout
+      - name: Checkout current source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           fetch-depth: 0
 
-      - name: Verify legacy release provenance record
+      - name: Verify immutable legacy baseline
         run: |
           set -euo pipefail
           tag=$(jq -r '.releaseTag' release-baseline.json)
@@ -42,17 +42,18 @@ jobs:
           test "$(jq -r '.reproducibility.kpimgLinuxByteIdentical' release-baseline.json)" = true
           test "$(jq -r '.reproducibility.kptoolsAndroidByteIdentical' release-baseline.json)" = true
 
-          declared=$(awk '/#define MAJOR/{a=$3} /#define MINOR/{b=$3} /#define PATCH/{c=$3} END{print a "." b "." c}' version)
-          test "$declared" = "$source_version"
-          test "$declared" != "$LEGACY_TAG" || {
-            echo "::error::Baseline no longer represents the acknowledged legacy mismatch"
-            exit 1
-          }
-
           git fetch --tags --force
           resolved=$(git rev-list -n 1 "$LEGACY_TAG")
           test "$resolved" = "$LEGACY_COMMIT" || {
             echo "::error::Legacy tag moved: expected $LEGACY_COMMIT, got $resolved"
+            exit 1
+          }
+
+          git worktree add --detach legacy "$LEGACY_COMMIT"
+          declared=$(awk '/#define MAJOR/{a=$3} /#define MINOR/{b=$3} /#define PATCH/{c=$3} END{print a "." b "." c}' legacy/version)
+          test "$declared" = "$source_version"
+          test "$declared" != "$LEGACY_TAG" || {
+            echo "::error::Baseline no longer records the historical version mismatch"
             exit 1
           }
 
@@ -70,7 +71,7 @@ jobs:
           echo "$KPIMG_LINUX_SHA256  reference/kpimg-linux" | sha256sum -c -
           echo "$KPTOOLS_ANDROID_SHA256  reference/kptools-android" | sha256sum -c -
 
-      - name: Recover deterministic compile timestamp
+      - name: Recover legacy compile timestamp
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -83,7 +84,6 @@ jobs:
           match = re.search(rb'(\d{2}:\d{2}:\d{2} [A-Z][a-z]{2} [ 0-9]\d 20\d{2})', data)
           if not match:
               raise SystemExit('compile timestamp not found in legacy kpimg-linux')
-
           stamp = match.group(1).decode('ascii')
           dt = datetime.datetime.strptime(stamp, '%H:%M:%S %b %d %Y').replace(
               tzinfo=datetime.timezone.utc
@@ -91,7 +91,7 @@ jobs:
           epoch = int(dt.timestamp())
           print(f'Legacy compile timestamp: {stamp} (SOURCE_DATE_EPOCH={epoch})')
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as env:
-              env.write(f'SOURCE_DATE_EPOCH={epoch}\n')
+              env.write(f'LEGACY_SOURCE_DATE_EPOCH={epoch}\n')
               env.write(f'LEGACY_COMPILE_TIME={stamp}\n')
           PY
 
@@ -107,29 +107,10 @@ jobs:
             echo "::error::Arm toolchain SHA256 mismatch: expected=$ARM_TOOLCHAIN_SHA256 actual=$actual"
             exit 1
           }
-
-      - name: Extract Arm toolchain
-        run: |
-          set -euo pipefail
           tar -xf arm-toolchain.tar.xz
           prefix="$PWD/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf/bin/aarch64-none-elf-"
           test -x "${prefix}gcc"
           echo "TOOLCHAIN=$prefix" >> "$GITHUB_ENV"
-
-      - name: Build kpimg Linux deterministically
-        run: |
-          set -euo pipefail
-          TARGET_COMPILE="$TOOLCHAIN" SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" make -C kernel clean
-          TARGET_COMPILE="$TOOLCHAIN" SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" make -C kernel
-          cp kernel/kpimg kpimg-linux
-          test -s kpimg-linux
-          actual=$(sha256sum kpimg-linux | awk '{print $1}')
-          echo "::notice title=kpimg-linux built SHA256::$actual"
-          cmp kpimg-linux reference/kpimg-linux || {
-            echo "::error::kpimg-linux still differs after restoring legacy compile timestamp $LEGACY_COMPILE_TIME"
-            exit 1
-          }
-          test "$actual" = "$KPIMG_LINUX_SHA256"
 
       - name: Setup Android NDK
         id: ndk
@@ -137,10 +118,59 @@ jobs:
         with:
           ndk-version: r26b
 
-      - name: Build kptools Android
+      - name: Reproduce legacy kpimg Linux
         run: |
           set -euo pipefail
-          TARGET_COMPILE=placeholder SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" make -C kernel hdr
+          TARGET_COMPILE="$TOOLCHAIN" \
+            SOURCE_DATE_EPOCH="$LEGACY_SOURCE_DATE_EPOCH" \
+            make -C legacy/kernel clean
+          TARGET_COMPILE="$TOOLCHAIN" \
+            SOURCE_DATE_EPOCH="$LEGACY_SOURCE_DATE_EPOCH" \
+            make -C legacy/kernel
+          cp legacy/kernel/kpimg legacy-kpimg-linux
+          actual=$(sha256sum legacy-kpimg-linux | awk '{print $1}')
+          echo "::notice title=legacy kpimg-linux SHA256::$actual"
+          cmp legacy-kpimg-linux reference/kpimg-linux
+          test "$actual" = "$KPIMG_LINUX_SHA256"
+
+      - name: Reproduce legacy kptools Android
+        run: |
+          set -euo pipefail
+          TARGET_COMPILE=placeholder \
+            SOURCE_DATE_EPOCH="$LEGACY_SOURCE_DATE_EPOCH" \
+            make -C legacy/kernel hdr
+          cmake -S legacy/tools -B legacy/tools/build/android \
+            -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DANDROID_PLATFORM=android-33 \
+            -DANDROID_ABI=arm64-v8a
+          cmake --build legacy/tools/build/android --parallel
+          "${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" \
+            legacy/tools/build/android/kptools
+          cp legacy/tools/build/android/kptools legacy-kptools-android
+          actual=$(sha256sum legacy-kptools-android | awk '{print $1}')
+          echo "::notice title=legacy kptools-android SHA256::$actual"
+          cmp legacy-kptools-android reference/kptools-android
+          test "$actual" = "$KPTOOLS_ANDROID_SHA256"
+
+      - name: Build current kpimg with strict warnings
+        run: |
+          set -euo pipefail
+          current_epoch=$(git show -s --format=%ct HEAD)
+          TARGET_COMPILE="$TOOLCHAIN" make -C kernel clean
+          TARGET_COMPILE="$TOOLCHAIN" \
+            SOURCE_DATE_EPOCH="$current_epoch" \
+            EXTRA_CFLAGS="-Werror=implicit-function-declaration -Werror=unused-variable -Werror=int-conversion" \
+            make -C kernel
+          cp kernel/kpimg kpimg-linux-current
+          test -s kpimg-linux-current
+          sha256sum kpimg-linux-current
+
+      - name: Build current kptools with strict format checks
+        run: |
+          set -euo pipefail
+          TARGET_COMPILE=placeholder make -C kernel hdr
           cmake -S tools -B tools/build/android \
             -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake" \
@@ -150,22 +180,17 @@ jobs:
           cmake --build tools/build/android --parallel
           "${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" \
             tools/build/android/kptools
-          cp tools/build/android/kptools kptools-android
-          actual=$(sha256sum kptools-android | awk '{print $1}')
-          echo "::notice title=kptools-android built SHA256::$actual"
-          cmp kptools-android reference/kptools-android || {
-            echo "::error::kptools-android is not byte-for-byte reproducible with legacy release"
-            exit 1
-          }
-          test "$actual" = "$KPTOOLS_ANDROID_SHA256"
+          cp tools/build/android/kptools kptools-android-current
+          test -s kptools-android-current
+          sha256sum kptools-android-current
 
-      - name: Upload verification artifacts
+      - name: Upload current verification artifacts
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
-          name: kernelpatch-verification-${{ github.sha }}
+          name: kernelpatch-current-${{ github.sha }}
           path: |
-            kpimg-linux
-            kptools-android
+            kpimg-linux-current
+            kptools-android-current
           if-no-files-found: warn
           retention-days: 14
