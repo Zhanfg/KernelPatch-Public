@@ -9,7 +9,7 @@ on:
   push:
     branches:
       - main
-      - restart/compiler-warning-cleanup
+      - 'restart/**'
   workflow_dispatch:
 
 env:
@@ -185,6 +185,21 @@ jobs:
           test -s kpimg-linux-current
           sha256sum kpimg-linux-current
 
+      - name: Audit current kpimg linker layout
+        run: |
+          set -euo pipefail
+          mkdir -p layout-audit
+          "${TOOLCHAIN}readelf" -lW kernel/kpimg.elf > layout-audit/program-headers.txt
+          "${TOOLCHAIN}readelf" -SW kernel/kpimg.elf > layout-audit/sections.txt
+          "${TOOLCHAIN}nm" -n kernel/kpimg.elf > layout-audit/symbols.txt
+          python3 scripts/audit_kpimg_layout.py \
+            --elf kernel/kpimg.elf \
+            --raw kernel/kpimg \
+            --readelf "${TOOLCHAIN}readelf" \
+            --nm "${TOOLCHAIN}nm" \
+            --json layout-audit/report.json \
+            --markdown layout-audit/report.md
+
       - name: Build current kptools with strict format checks
         run: |
           set -euo pipefail
@@ -210,5 +225,6 @@ jobs:
           path: |
             kpimg-linux-current
             kptools-android-current
+            layout-audit/
           if-no-files-found: warn
           retention-days: 14
