@@ -37,32 +37,26 @@ jobs:
               '#include <accctl.h>\n',
               '#include <accctl.h>\n#include <userd.h>\n',
           )
-
           replace(
               'kernel/patch/common/supercmd.c',
               '#ifdef ANDROID\n#include <userd.h>\n#endif\n',
               '#include <userd.h>\n',
           )
-
           replace(
               'kernel/patch/module/module.c',
               '#include <kpm_safety.h>\n',
               '#include <kpm_safety.h>\n#include <accctl.h>\n',
           )
-
           replace(
               'kernel/patch/common/supercall.c',
-              '''    int rc = compat_copy_to_user(uids, buf, count * sizeof(uid_t));
-              kvfree(buf);
-              return count;
-              ''',
-              '''    int rc = compat_copy_to_user(uids, buf, count * sizeof(uid_t));
-              kvfree(buf);
-              if (rc) return -EFAULT;
-              return count;
-              ''',
+              '    int rc = compat_copy_to_user(uids, buf, count * sizeof(uid_t));\n'
+              '    kvfree(buf);\n'
+              '    return count;',
+              '    int rc = compat_copy_to_user(uids, buf, count * sizeof(uid_t));\n'
+              '    kvfree(buf);\n'
+              '    if (rc) return -EFAULT;\n'
+              '    return count;',
           )
-
           replace(
               'tools/kallsym.c',
               'tools_logi("kernel base address: 0x%08llx\\n", info->kernel_base);',
@@ -73,13 +67,11 @@ jobs:
               'tools_logi("kernel base address: 0x%llx\\n", info->kernel_base);',
               'tools_logi("kernel base address: 0x%" PRIx64 "\\n", info->kernel_base);',
           )
-
           replace(
               'kernel/Makefile',
               'CFLAGS += -g\n',
               'CFLAGS += -g\nCFLAGS += $(EXTRA_CFLAGS)\n',
           )
-
           replace(
               'tools/CMakeLists.txt',
               'cmake_minimum_required(VERSION 3.5)',
@@ -93,7 +85,7 @@ jobs:
           )
           PY
 
-      - name: Remove temporary diagnostics
+      - name: Remove temporary workflows
         run: |
           rm -f .github/workflows/diagnose-warnings.yml
           rm -f .github/workflows/apply-warning-cleanup.yml
