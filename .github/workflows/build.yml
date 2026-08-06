@@ -49,27 +49,24 @@ jobs:
             exit 1
           }
 
-          git worktree add --detach legacy "$LEGACY_COMMIT"
-          declared=$(awk '/#define MAJOR/{a=$3} /#define MINOR/{b=$3} /#define PATCH/{c=$3} END{print a "." b "." c}' legacy/version)
-          test "$declared" = "$source_version"
-          test "$declared" != "$LEGACY_TAG" || {
-            echo "::error::Baseline no longer records the historical version mismatch"
-            exit 1
-          }
+          echo "CURRENT_SHA=$GITHUB_SHA" >> "$GITHUB_ENV"
+          echo "LEGACY_SOURCE_VERSION=$source_version" >> "$GITHUB_ENV"
 
       - name: Download trusted legacy assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir -p reference
+          reference="$RUNNER_TEMP/kernelpatch-reference"
+          mkdir -p "$reference"
           gh release download "$LEGACY_TAG" \
             -R Zhanfg/KernelPatch-Public \
             -p kpimg-linux \
             -p kptools-android \
-            -D reference
-          echo "$KPIMG_LINUX_SHA256  reference/kpimg-linux" | sha256sum -c -
-          echo "$KPTOOLS_ANDROID_SHA256  reference/kptools-android" | sha256sum -c -
+            -D "$reference"
+          echo "$KPIMG_LINUX_SHA256  $reference/kpimg-linux" | sha256sum -c -
+          echo "$KPTOOLS_ANDROID_SHA256  $reference/kptools-android" | sha256sum -c -
+          echo "REFERENCE_DIR=$reference" >> "$GITHUB_ENV"
 
       - name: Recover legacy compile timestamp
         run: |
@@ -80,7 +77,7 @@ jobs:
           import re
           from pathlib import Path
 
-          data = Path('reference/kpimg-linux').read_bytes()
+          data = (Path(os.environ['REFERENCE_DIR']) / 'kpimg-linux').read_bytes()
           match = re.search(rb'(\d{2}:\d{2}:\d{2} [A-Z][a-z]{2} [ 0-9]\d 20\d{2})', data)
           if not match:
               raise SystemExit('compile timestamp not found in legacy kpimg-linux')
@@ -98,17 +95,20 @@ jobs:
       - name: Download and verify Arm toolchain
         run: |
           set -euo pipefail
+          archive="$RUNNER_TEMP/arm-toolchain.tar.xz"
+          toolchain_root="$RUNNER_TEMP/arm-toolchain"
           curl -fL --retry 3 --retry-delay 2 \
             "$ARM_TOOLCHAIN_URL" \
-            -o arm-toolchain.tar.xz
-          actual=$(sha256sum arm-toolchain.tar.xz | awk '{print $1}')
+            -o "$archive"
+          actual=$(sha256sum "$archive" | awk '{print $1}')
           echo "::notice title=Arm toolchain SHA256::$actual"
           test "$actual" = "$ARM_TOOLCHAIN_SHA256" || {
             echo "::error::Arm toolchain SHA256 mismatch: expected=$ARM_TOOLCHAIN_SHA256 actual=$actual"
             exit 1
           }
-          tar -xf arm-toolchain.tar.xz
-          prefix="$PWD/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf/bin/aarch64-none-elf-"
+          mkdir -p "$toolchain_root"
+          tar -xf "$archive" -C "$toolchain_root"
+          prefix="$toolchain_root/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf/bin/aarch64-none-elf-"
           test -x "${prefix}gcc"
           echo "TOOLCHAIN=$prefix" >> "$GITHUB_ENV"
 
@@ -118,19 +118,29 @@ jobs:
         with:
           ndk-version: r26b
 
+      - name: Checkout legacy source at repository root
+        run: |
+          set -euo pipefail
+          git reset --hard
+          git clean -fdx
+          git checkout --detach "$LEGACY_COMMIT"
+          declared=$(awk '/#define MAJOR/{a=$3} /#define MINOR/{b=$3} /#define PATCH/{c=$3} END{print a "." b "." c}' version)
+          test "$declared" = "$LEGACY_SOURCE_VERSION"
+          test "$declared" != "$LEGACY_TAG"
+
       - name: Reproduce legacy kpimg Linux
         run: |
           set -euo pipefail
           TARGET_COMPILE="$TOOLCHAIN" \
             SOURCE_DATE_EPOCH="$LEGACY_SOURCE_DATE_EPOCH" \
-            make -C legacy/kernel clean
+            make -C kernel clean
           TARGET_COMPILE="$TOOLCHAIN" \
             SOURCE_DATE_EPOCH="$LEGACY_SOURCE_DATE_EPOCH" \
-            make -C legacy/kernel
-          cp legacy/kernel/kpimg legacy-kpimg-linux
+            make -C kernel
+          cp kernel/kpimg legacy-kpimg-linux
           actual=$(sha256sum legacy-kpimg-linux | awk '{print $1}')
           echo "::notice title=legacy kpimg-linux SHA256::$actual"
-          cmp legacy-kpimg-linux reference/kpimg-linux
+          cmp legacy-kpimg-linux "$REFERENCE_DIR/kpimg-linux"
           test "$actual" = "$KPIMG_LINUX_SHA256"
 
       - name: Reproduce legacy kptools Android
@@ -138,21 +148,29 @@ jobs:
           set -euo pipefail
           TARGET_COMPILE=placeholder \
             SOURCE_DATE_EPOCH="$LEGACY_SOURCE_DATE_EPOCH" \
-            make -C legacy/kernel hdr
-          cmake -S legacy/tools -B legacy/tools/build/android \
+            make -C kernel hdr
+          cmake -S tools -B tools/build/android \
             -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake" \
             -DCMAKE_BUILD_TYPE=Release \
             -DANDROID_PLATFORM=android-33 \
             -DANDROID_ABI=arm64-v8a
-          cmake --build legacy/tools/build/android --parallel
+          cmake --build tools/build/android --parallel
           "${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" \
-            legacy/tools/build/android/kptools
-          cp legacy/tools/build/android/kptools legacy-kptools-android
+            tools/build/android/kptools
+          cp tools/build/android/kptools legacy-kptools-android
           actual=$(sha256sum legacy-kptools-android | awk '{print $1}')
           echo "::notice title=legacy kptools-android SHA256::$actual"
-          cmp legacy-kptools-android reference/kptools-android
+          cmp legacy-kptools-android "$REFERENCE_DIR/kptools-android"
           test "$actual" = "$KPTOOLS_ANDROID_SHA256"
+
+      - name: Restore current source
+        run: |
+          set -euo pipefail
+          git reset --hard
+          git clean -fdx
+          git checkout --detach "$CURRENT_SHA"
+          test "$(git rev-parse HEAD)" = "$CURRENT_SHA"
 
       - name: Build current kpimg with strict warnings
         run: |
