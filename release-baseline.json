@@ -1,0 +1,15 @@
+{
+  "releaseTag": "0.13.3",
+  "releaseCommit": "e26a2e14e3b8d60a19dd3c7f354a777faa574f4f",
+  "sourceVersion": "0.13.2",
+  "status": "legacy-version-mismatch",
+  "consumedAssets": {
+    "kpimg-linux": {
+      "sha256": "7b8cf7e97169d2d73b2e11653ad5bdbc6fc6251c5507b8d108f4a2e0bcd76f"
+    },
+    "kptools-android": {
+      "sha256": "ebf9b8eb17b4b3a6b1d4959402033bb1c6c4044d0e2532d480c34d1f412d5225"
+    }
+  },
+  "notes": "The historical release tag is 0.13.3, but the version header at the tagged commit declares 0.13.2. The release remains a legacy dependency only; new publishing is blocked until a corrected version is built and device-tested."
+}
