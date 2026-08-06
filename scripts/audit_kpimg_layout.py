@@ -134,6 +134,10 @@ def markdown_report(report: dict[str, Any]) -> str:
         "",
         f"- Size: `{report['raw']['size']}` bytes (`{hexadecimal(report['raw']['size'])}`)",
         f"- SHA-256: `{report['raw']['sha256']}`",
+        f"- ELF prefix omitted by raw conversion: `{hexadecimal(report['derived']['leading_virtual_gap'])}`",
+        f"- File-backed end address: `{hexadecimal(report['derived']['file_backed_end'])}`",
+        f"- Aligned link end: `{hexadecimal(report['derived']['aligned_link_end'])}`",
+        f"- Trailing address-only alignment: `{hexadecimal(report['derived']['trailing_virtual_padding'])}`",
         "",
         "## Required symbols",
         "",
@@ -225,13 +229,19 @@ def main() -> int:
     missing_symbols = sorted(set(REQUIRED_SYMBOLS) - symbols.keys())
     missing_sections = sorted(set(REQUIRED_SECTIONS) - sections.keys())
 
+    link_base = symbols.get("_link_base", 0)
+    aligned_link_end = symbols.get("_link_end", 0)
+    file_backed_end = max(
+        (section["address"] + section["size"] for section in sections.values()),
+        default=0,
+    )
+
     checks: dict[str, bool] = {
         "all_required_symbols_present": not missing_symbols,
         "all_required_sections_present": not missing_sections,
     }
 
     if not missing_symbols:
-        link_base = symbols["_link_base"]
         link_end = symbols["_link_end"]
         checks.update(
             {
@@ -256,16 +266,22 @@ def main() -> int:
                 "kernel_start_is_64k_aligned": symbols["_kp_start"] % 0x10000 == 0,
                 "kernel_data_is_64k_aligned": symbols["_kp_data_start"] % 0x10000 == 0,
                 "kernel_end_is_64k_aligned": symbols["_kp_end"] % 0x10000 == 0,
-                "raw_size_matches_link_span": raw_size == link_end - link_base,
             }
         )
 
     if not missing_symbols and not missing_sections:
-        link_base = symbols["_link_base"]
         checks.update(
             {
                 "setup_data_starts_at_link_base": sections[".setup.data"]["address"] == link_base,
                 "setup_data_reserves_4k": sections[".setup.data"]["size"] == 0x1000,
+                "setup_map_is_currently_wax": set("WAX").issubset(
+                    set(sections[".setup.map"]["flags"])
+                ),
+                "file_backed_end_matches_kp_data_end": file_backed_end
+                == symbols["_kp_data_end"],
+                "aligned_link_end_follows_file_data": aligned_link_end >= file_backed_end,
+                "raw_size_matches_file_backed_span": raw_size
+                == file_backed_end - link_base,
                 "sections_fit_raw_image": all(
                     section["address"] >= link_base
                     and section["address"] - link_base + section["size"] <= raw_size
@@ -275,17 +291,30 @@ def main() -> int:
         )
 
     checks["single_load_segment"] = len(loads) == 1
-    if len(loads) == 1 and not missing_symbols:
+    if len(loads) == 1 and not missing_symbols and not missing_sections:
         load = loads[0]
         checks.update(
             {
-                "load_starts_at_link_base": load["virtual_address"] == symbols["_link_base"],
-                "load_file_size_matches_raw": load["file_size"] == raw_size,
-                "load_memory_size_matches_raw": load["memory_size"] == raw_size,
+                "load_starts_at_zero": load["virtual_address"] == 0,
+                "load_file_size_matches_file_backed_end": load["file_size"]
+                == file_backed_end,
+                "load_memory_size_matches_file_backed_end": load["memory_size"]
+                == file_backed_end,
+                "raw_size_matches_trimmed_load": raw_size
+                == load["file_size"] - link_base,
+                "load_alignment_is_64k": load["alignment"] == 0x10000,
             }
         )
 
     warnings: list[str] = []
+    setup_map = sections.get(".setup.map")
+    if setup_map and "W" in setup_map["flags"] and "X" in setup_map["flags"]:
+        warnings.append(
+            "The .setup.map output section is both writable and executable because it "
+            "combines map data and map text. Splitting only ELF program headers would not "
+            "fully remove the W+X overlap."
+        )
+
     rwx_loads = [load for load in loads if set("RWE").issubset(set(load["flags"]))]
     if rwx_loads:
         warnings.append(
@@ -302,6 +331,12 @@ def main() -> int:
             "sha256": hashlib.sha256(raw_data).hexdigest(),
         },
         "elf": {"path": str(args.elf)},
+        "derived": {
+            "leading_virtual_gap": link_base,
+            "file_backed_end": file_backed_end,
+            "aligned_link_end": aligned_link_end,
+            "trailing_virtual_padding": max(aligned_link_end - file_backed_end, 0),
+        },
         "symbols": symbols,
         "sections": sections,
         "load_segments": loads,
