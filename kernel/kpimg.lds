@@ -2,6 +2,20 @@ OUTPUT_ARCH(aarch64)
 
 _link_base = 64k - 3 * 4k;
 
+/*
+ * Experimental program-header split. The raw kpimg is generated from section
+ * VMAs with objcopy; these PHDRs must not change section addresses or bytes.
+ */
+PHDRS
+{
+    setup_data PT_LOAD FLAGS(6); /* R W */
+    setup_text PT_LOAD FLAGS(5); /* R E */
+    map_data   PT_LOAD FLAGS(6); /* R W */
+    map_text   PT_LOAD FLAGS(5); /* R E */
+    kp_text    PT_LOAD FLAGS(5); /* R E */
+    kp_data    PT_LOAD FLAGS(6); /* R W */
+}
+
 SECTIONS
 {
     /DISCARD/ : { *(.discard) *(.discard.*) }
@@ -19,27 +33,27 @@ SECTIONS
         base/setup.o(.setup.preset)
         base/setup.o(.setup.data)
         . = _setup_start + 4K;
-    }
+    } :setup_data
 
     .setup.text : {
         base/setup1.o(.entry.text)
         base/setup1.o(.text)
         base/setup.o(.text)
         _setup_end = .;
-    }
+    } :setup_text
 
     . = ALIGN(16);
     .setup.map.data : {
         _map_start = .;
         base/map.o(.map.data)
-    }
+    } :map_data
     .setup.map.text : {
         base/map.o(.map.text)
         base/map.o(.text)
         base/map1.o(.text)
         . = ALIGN(16);
         _map_end = .;
-    }
+    } :map_text
     ASSERT(
         SIZEOF(.setup.map.data) + SIZEOF(.setup.map.text) < 0xa00,
         "Combined size too large for setup map region!"
@@ -80,7 +94,7 @@ SECTIONS
 
         . = ALIGN(16);
         _kp_text_end = .;
-    }
+    } :kp_text
 
     . = ALIGN(64k);
     .kp.data : {
@@ -95,9 +109,9 @@ SECTIONS
         *(.kp.symbol)
         _kp_symbol_end = .;
         _kp_data_end = .;
-    }
+    } :kp_data
 
-    .got.plt : { *(.got.plt) }
+    .got.plt : { *(.got.plt) } :NONE
     ASSERT(SIZEOF(.got.plt) == 0, "Unexpected GOT/PLT entries detected!")
 
     . = ALIGN(64k);
@@ -107,21 +121,21 @@ SECTIONS
 
     .got : {
         *(.got)
-    }
+    } :NONE
     ASSERT(SIZEOF(.got) == 0, "Unexpected GOT detected!")
 
     .plt : {
         *(.plt) *(.plt.*) *(.iplt) *(.igot .igot.plt)
-    }
+    } :NONE
     ASSERT(SIZEOF(.plt) == 0, "Unexpected run-time procedure linkages detected!")
 
     .data.rel.ro : {
         *(.data.rel.ro)
-    }
+    } :NONE
     ASSERT(SIZEOF(.data.rel.ro) == 0, "Unexpected RELRO detected!")
 
     .rela.dyn : {
         *(.rela .rela*)
-    }
+    } :NONE
     ASSERT(SIZEOF(.rela.dyn) == 0, "Unexpected RELRDYN detected!")
 }
