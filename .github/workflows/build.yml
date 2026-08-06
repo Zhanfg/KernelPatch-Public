@@ -17,7 +17,7 @@ env:
   LEGACY_COMMIT: e26a2e14e3b8d60a19dd3c7f354a777faa574f4f
   ARM_TOOLCHAIN_URL: https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
   ARM_TOOLCHAIN_SHA256: 62d66e0ad7bd7f2a183d236ee301a5c73c737c886c7944aa4f39415aab528daf
-  KPIMG_LINUX_SHA256: 7b8cf7e97169d2d73b2e11653ad5bdbc6fc6251c5507b8d108f4a2e0bcd76f
+  KPIMG_LINUX_SHA256: 7b8cf7e97169d2d73bba2e11653ad5bdbc6fc6251c5507b8d108f4a2e0bcd76f
   KPTOOLS_ANDROID_SHA256: ebf9b8eb17b4b3a6b1d4959402033bb1c6c4044d0e2532d480c34d1f412d5225
 
 jobs:
@@ -54,6 +54,45 @@ jobs:
             exit 1
           }
 
+      - name: Download trusted legacy assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p reference
+          gh release download "$LEGACY_TAG" \
+            -R Zhanfg/KernelPatch-Public \
+            -p kpimg-linux \
+            -p kptools-android \
+            -D reference
+          echo "$KPIMG_LINUX_SHA256  reference/kpimg-linux" | sha256sum -c -
+          echo "$KPTOOLS_ANDROID_SHA256  reference/kptools-android" | sha256sum -c -
+
+      - name: Recover deterministic compile timestamp
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import datetime
+          import os
+          import re
+          from pathlib import Path
+
+          data = Path('reference/kpimg-linux').read_bytes()
+          match = re.search(rb'(\d{2}:\d{2}:\d{2} [A-Z][a-z]{2} [ 0-9]\d 20\d{2})', data)
+          if not match:
+              raise SystemExit('compile timestamp not found in legacy kpimg-linux')
+
+          stamp = match.group(1).decode('ascii')
+          dt = datetime.datetime.strptime(stamp, '%H:%M:%S %b %d %Y').replace(
+              tzinfo=datetime.timezone.utc
+          )
+          epoch = int(dt.timestamp())
+          print(f'Legacy compile timestamp: {stamp} (SOURCE_DATE_EPOCH={epoch})')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as env:
+              env.write(f'SOURCE_DATE_EPOCH={epoch}\n')
+              env.write(f'LEGACY_COMPILE_TIME={stamp}\n')
+          PY
+
       - name: Download and verify Arm toolchain
         run: |
           set -euo pipefail
@@ -75,19 +114,20 @@ jobs:
           test -x "${prefix}gcc"
           echo "TOOLCHAIN=$prefix" >> "$GITHUB_ENV"
 
-      - name: Build kpimg Linux
+      - name: Build kpimg Linux deterministically
         run: |
           set -euo pipefail
-          TARGET_COMPILE="$TOOLCHAIN" make -C kernel clean
-          TARGET_COMPILE="$TOOLCHAIN" make -C kernel
+          TARGET_COMPILE="$TOOLCHAIN" SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" make -C kernel clean
+          TARGET_COMPILE="$TOOLCHAIN" SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" make -C kernel
           cp kernel/kpimg kpimg-linux
           test -s kpimg-linux
           actual=$(sha256sum kpimg-linux | awk '{print $1}')
           echo "::notice title=kpimg-linux built SHA256::$actual"
-          test "$actual" = "$KPIMG_LINUX_SHA256" || {
-            echo "::error::kpimg-linux is not byte-for-byte reproducible with legacy release"
+          cmp kpimg-linux reference/kpimg-linux || {
+            echo "::error::kpimg-linux still differs after restoring legacy compile timestamp $LEGACY_COMPILE_TIME"
             exit 1
           }
+          test "$actual" = "$KPIMG_LINUX_SHA256"
 
       - name: Setup Android NDK
         id: ndk
@@ -98,7 +138,7 @@ jobs:
       - name: Build kptools Android
         run: |
           set -euo pipefail
-          TARGET_COMPILE=placeholder make -C kernel hdr
+          TARGET_COMPILE=placeholder SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" make -C kernel hdr
           cmake -S tools -B tools/build/android \
             -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake" \
@@ -111,10 +151,11 @@ jobs:
           cp tools/build/android/kptools kptools-android
           actual=$(sha256sum kptools-android | awk '{print $1}')
           echo "::notice title=kptools-android built SHA256::$actual"
-          test "$actual" = "$KPTOOLS_ANDROID_SHA256" || {
+          cmp kptools-android reference/kptools-android || {
             echo "::error::kptools-android is not byte-for-byte reproducible with legacy release"
             exit 1
           }
+          test "$actual" = "$KPTOOLS_ANDROID_SHA256"
 
       - name: Upload verification artifacts
         if: always()
