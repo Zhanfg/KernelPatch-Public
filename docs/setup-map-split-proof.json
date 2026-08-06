@@ -1,0 +1,37 @@
+{
+  "verifiedAt": "2026-08-06",
+  "baselineCommit": "b2270f7bd3d186b6960e44d87a5885ab11bf7c41",
+  "sourceDateEpoch": 1786025302,
+  "baselineRawSha256": "afd39b9c077afdd15454e2eebb2db7b454c079cd5b8b71c5663511a73e371d24",
+  "candidateRawSha256": "afd39b9c077afdd15454e2eebb2db7b454c079cd5b8b71c5663511a73e371d24",
+  "rawByteIdentical": true,
+  "requiredSymbolsIdentical": true,
+  "rawSize": 183744,
+  "symbols": {
+    "_link_base": 53248,
+    "_setup_start": 53248,
+    "_setup_end": 58232,
+    "_map_start": 58240,
+    "_map_end": 59808,
+    "_kp_start": 65536,
+    "_kp_text_start": 65536,
+    "_kp_text_end": 177264,
+    "_kp_data_start": 196608,
+    "_kp_data_end": 236992,
+    "_kp_end": 262144,
+    "_link_end": 262144
+  },
+  "sections": {
+    ".setup.map.data": {
+      "address": 58240,
+      "size": 160,
+      "flags": "WA"
+    },
+    ".setup.map.text": {
+      "address": 58400,
+      "size": 1408,
+      "flags": "AX"
+    }
+  },
+  "remainingRisk": "The intermediate ELF still contains one RWE LOAD segment; PHDR permissions are unchanged."
+}
