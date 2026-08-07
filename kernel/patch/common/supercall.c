@@ -153,12 +153,12 @@ static long call_su(struct su_profile *__user uprofile)
 
 static long call_su_task(pid_t pid, struct su_profile *__user uprofile)
 {
-    struct su_profile *profile = memdup_user(uprofile, sizeof(struct su_profile));
-    if (!profile || IS_ERR(profile)) return PTR_ERR(profile);
-    profile->scontext[sizeof(profile->scontext) - 1] = '\0';
-    int rc = task_su(pid, profile->to_uid, profile->scontext);
-    kvfree(profile);
-    return rc;
+    /* Remote mutation of another task's seccomp and shared credentials has no
+     * safe synchronization contract. Keep the ABI explicitly fail-closed until
+     * a target-context task_work/credential replacement design is implemented. */
+    (void)pid;
+    (void)uprofile;
+    return -EOPNOTSUPP;
 }
 
 static long call_skey_get(char *__user out_key, int out_len)
@@ -342,9 +342,17 @@ static long call_kpm_event(int event, const char __user *usource, const char __u
     char args[1024] = { 0 };
     if (usource) compat_strncpy_from_user(source, usource, sizeof(source));
     if (uargs) compat_strncpy_from_user(args, uargs, sizeof(args));
-    return module_dispatch_event((enum kpm_event)event,
-                                 source[0] ? source : NULL,
-                                 args[0] ? args : NULL);
+
+    long rc = module_dispatch_event((enum kpm_event)event,
+                                    source[0] ? source : NULL,
+                                    args[0] ? args : NULL);
+    if (rc >= 0 && event == KPM_EVENT_BOOT_COMPLETED) {
+        /* Android init emits the authenticated boot-completed KPM event from
+         * its sys.boot_completed=1 trigger. Bind crash-protection confirmation
+         * to that existing event path instead of a second polling mechanism. */
+        kpm_safety_confirm_boot_completed();
+    }
+    return rc;
 }
 
 /* Umount config handlers */
