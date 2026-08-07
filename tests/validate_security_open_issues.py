@@ -52,6 +52,16 @@ def main() -> int:
     blacklist = supercall.find("case SUPERCALL_SAFETY_BL_CLEAR:")
     require(first_auth_gate >= 0 and min(grant, safemode, blacklist) > first_auth_gate,
             "#6: global mutation opcode appears before full-auth gate")
+    manager_auth = re.search(r"int is_trusted_manager_uid\(uid_t uid\).*?\n\}", supercall, re.S)
+    require(manager_auth is not None,
+            "#6: trusted-manager authorization wrapper not found")
+    manager_text = manager_auth.group(0)
+    require(manager_text.count("is_trusted_manager_uid_android(uid)") >= 2,
+            "#6: cached manager UID is not rechecked after refresh")
+    require("refresh_trusted_manager_uid();" in manager_text,
+            "#6: cached manager UID is trusted without current package/signature refresh")
+    require(re.search(r"if \(rc\).*?return 0;", manager_text, re.S) is not None,
+            "#6: trusted-manager refresh failure is not fail-closed")
 
     # #11 remote task mutation is fail-closed until a target-context redesign.
     su_task = re.search(r"static long call_su_task\(.*?\n\}", supercall, re.S)
@@ -124,17 +134,6 @@ def main() -> int:
             "#14: boot-completed event is not connected to confirmation")
     require("sys.boot_completed=1" in userd and "event boot-completed" in userd,
             "#14: Android boot-completed trigger is absent")
-
-    # #6 cached manager trust must fail closed when package/signature refresh fails.
-    refresh = re.search(r"static int refresh_trusted_manager_state_from_packages_list\(.*?\n\}", userd, re.S)
-    require(refresh is not None, "#6: trusted-manager refresh function not found")
-    stale_fixed = re.search(
-        r"if \(rc\) \{.*?trusted_manager_uid\s*=\s*TRUSTED_MANAGER_UID_INVALID",
-        refresh.group(0),
-        re.S,
-    )
-    require(stale_fixed is not None,
-            "#6: trusted-manager refresh failure retains cached UID")
 
     print("KernelPatch security source contracts passed; runtime evidence is still required.")
     return 0
