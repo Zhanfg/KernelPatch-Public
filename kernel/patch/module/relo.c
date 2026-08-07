@@ -40,7 +40,7 @@ static u64 do_reloc(enum aarch64_reloc_op reloc_op, void *place, u64 val)
 
 static int reloc_data(enum aarch64_reloc_op op, void *place, u64 val, int len)
 {
-    u64 imm_mask = (1ULL << len) - 1;
+    u64 imm_mask = len == 64 ? ~0ULL : ((1ULL << len) - 1);
     s64 sval = do_reloc(op, place, val);
 
     switch (len) {
@@ -119,7 +119,6 @@ static int reloc_insn_imm(enum aarch64_reloc_op op, void *place, u64 val, int ls
 static int relocation_write_width(unsigned int type)
 {
     switch (type) {
-    case R_ARM_NONE:
     case R_AARCH64_NONE:
         return 0;
     case R_AARCH64_ABS16:
