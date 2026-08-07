@@ -516,6 +516,15 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
 int is_trusted_manager_uid(uid_t uid)
 {
 #ifdef ANDROID
+    /* Cached UID is only a fast reject. A cached positive match must be
+     * revalidated against current packages.list + APK signer state before it
+     * can grant full management authority. Refresh failure is fail-closed. */
+    if (!is_trusted_manager_uid_android(uid)) return 0;
+    int rc = refresh_trusted_manager_uid();
+    if (rc) {
+        logkfd("trusted manager revalidation failed for uid=%u rc=%d\n", uid, rc);
+        return 0;
+    }
     return is_trusted_manager_uid_android(uid);
 #endif
     return 0;
