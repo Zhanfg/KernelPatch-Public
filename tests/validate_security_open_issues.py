@@ -107,7 +107,8 @@ def main() -> int:
             "#13: relocation write range is not bounded")
     require("relocation_write_width" in relo,
             "#13: relocation memory write width is not modeled")
-    require("return -ENOEXEC;" in re.search(r"int apply_relocate\(.*?\n\}", relo, re.S).group(0),
+    rel_handler = re.search(r"int apply_relocate\(.*?\n\}", relo, re.S)
+    require(rel_handler is not None and "return -ENOEXEC;" in rel_handler.group(0),
             "#13: unsupported REL sections are silently accepted")
 
     # #14 one persistent attempt and existing Android boot-completed event bind.
@@ -124,12 +125,16 @@ def main() -> int:
     require("sys.boot_completed=1" in userd and "event boot-completed" in userd,
             "#14: Android boot-completed trigger is absent")
 
-    # #6 remaining known blocker: refresh failure currently retains the old UID.
+    # #6 cached manager trust must fail closed when package/signature refresh fails.
     refresh = re.search(r"static int refresh_trusted_manager_state_from_packages_list\(.*?\n\}", userd, re.S)
     require(refresh is not None, "#6: trusted-manager refresh function not found")
-    stale_fixed = re.search(r"if \(rc\) \{.*?trusted_manager_uid\s*=\s*TRUSTED_MANAGER_UID_INVALID", refresh.group(0), re.S)
-    if not stale_fixed:
-        print("OPEN #6: trusted-manager refresh failure still needs explicit cached-UID invalidation")
+    stale_fixed = re.search(
+        r"if \(rc\) \{.*?trusted_manager_uid\s*=\s*TRUSTED_MANAGER_UID_INVALID",
+        refresh.group(0),
+        re.S,
+    )
+    require(stale_fixed is not None,
+            "#6: trusted-manager refresh failure retains cached UID")
 
     print("KernelPatch security source contracts passed; runtime evidence is still required.")
     return 0
