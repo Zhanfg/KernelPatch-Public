@@ -21,9 +21,9 @@ int kpm_safety_persist_boot_attempt(void);
 int kpm_safety_confirm_boot_completed(void);
 
 /*
- * Compatibility with the existing module_init() call sites.  These wrappers
+ * Compatibility with the existing module_init() call sites. These wrappers
  * deliberately perform no persistent /data accounting: module_init may run
- * before /data is mounted.  The persistent transition is owned exclusively by
+ * before /data is mounted. The persistent transition is owned exclusively by
  * the post-fs-data event path.
  */
 static inline void kpm_safety_early_count(void)
@@ -36,20 +36,24 @@ static inline int kpm_safety_check_boot_count(void)
     return 0;
 }
 
-/* Pre-load ELF validation */
+/*
+ * Basic ELF identity/header sanity only. Untrusted section, string, symbol,
+ * relocation and size metadata are validated by module.c::validate_elf_structure()
+ * before setup_load_info() is allowed to consume them.
+ */
 int kpm_safety_validate(const void *data, int len);
 
-/* Blacklist check: returns 1 if KPM should be skipped */
+/* Blacklist check: returns 1 if KPM should be skipped. */
 int kpm_safety_check_blacklist(const char *kpm_name);
 
-/* Mark a KPM as currently being loaded (for crash attribution) */
+/* Mark a KPM as currently being loaded for attempt-bound crash attribution. */
 void kpm_safety_mark_loading(const char *kpm_name);
 
-/* Explicit blacklist management */
+/* Explicit blacklist management. */
 void kpm_safety_add_to_blacklist(const char *kpm_name);
 void kpm_safety_clear_blacklist(void);
 
-/* Init */
+/* Init in-memory safety state; no persistent /data accounting occurs here. */
 void kpm_safety_init(void);
 
 #endif
