@@ -30,18 +30,30 @@ static bool root_superkey_is_set = false;
 
 int auth_superkey(const char *key)
 {
-    int rc = 0;
-    for (int i = 0; superkey[i]; i++) {
-        rc |= (superkey[i] ^ key[i]);
+    if (!key || !superkey) return 1;
+
+    /* Credentials are exact bounded strings. Reject empty or unterminated
+     * candidates and never accept a valid key merely as a prefix. */
+    size_t stored_len = lib_strnlen(superkey, SUPER_KEY_LEN);
+    size_t candidate_len = lib_strnlen(key, SUPER_KEY_LEN);
+    int rc = 1;
+
+    if (stored_len > 0 && stored_len < SUPER_KEY_LEN && candidate_len == stored_len) {
+        unsigned int diff = 0;
+        for (size_t i = 0; i < stored_len; i++) {
+            diff |= (unsigned char)superkey[i] ^ (unsigned char)key[i];
+        }
+        rc = !!diff;
     }
     if (!rc) goto out;
 
     if (!enable_root_key) goto out;
+    if (candidate_len == 0 || candidate_len >= SUPER_KEY_LEN) goto out;
 
     BYTE hash[SHA256_BLOCK_SIZE];
     SHA256_CTX ctx;
     sha256_init(&ctx);
-    sha256_update(&ctx, (const BYTE *)key, lib_strnlen(key, SUPER_KEY_LEN));
+    sha256_update(&ctx, (const BYTE *)key, candidate_len);
     sha256_final(&ctx, hash);
     int len = SHA256_BLOCK_SIZE > ROOT_SUPER_KEY_HASH_LEN ? ROOT_SUPER_KEY_HASH_LEN : SHA256_BLOCK_SIZE;
     rc = lib_memcmp(root_superkey, hash, len);
