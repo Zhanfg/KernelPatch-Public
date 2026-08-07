@@ -30,18 +30,34 @@ static bool root_superkey_is_set = false;
 
 int auth_superkey(const char *key)
 {
-    int rc = 0;
-    for (int i = 0; superkey[i]; i++) {
-        rc |= (superkey[i] ^ key[i]);
+    if (!key || !superkey) return 1;
+
+    unsigned long stored_len = lib_strnlen(superkey, SUPER_KEY_LEN);
+    unsigned long key_len = lib_strnlen(key, SUPER_KEY_LEN);
+
+    /*
+     * Authentication is an exact bounded-string comparison.  A missing NUL in
+     * the protocol field, an empty key, or any suffix/prefix length mismatch is
+     * invalid.  Compare the complete fixed-size field so the first mismatching
+     * byte does not become an early-return timing signal.
+     */
+    unsigned char diff = (stored_len != key_len);
+    for (unsigned long i = 0; i < SUPER_KEY_LEN; i++) {
+        unsigned char stored = i < stored_len ? (unsigned char)superkey[i] : 0;
+        unsigned char candidate = i < key_len ? (unsigned char)key[i] : 0;
+        diff |= stored ^ candidate;
     }
+
+    int rc = (stored_len == 0 || stored_len >= SUPER_KEY_LEN || key_len == 0 || key_len >= SUPER_KEY_LEN || diff);
     if (!rc) goto out;
 
-    if (!enable_root_key) goto out;
+    /* Root-key authentication uses the same canonical candidate contract. */
+    if (!enable_root_key || key_len == 0 || key_len >= SUPER_KEY_LEN) goto out;
 
     BYTE hash[SHA256_BLOCK_SIZE];
     SHA256_CTX ctx;
     sha256_init(&ctx);
-    sha256_update(&ctx, (const BYTE *)key, lib_strnlen(key, SUPER_KEY_LEN));
+    sha256_update(&ctx, (const BYTE *)key, key_len);
     sha256_final(&ctx, hash);
     int len = SHA256_BLOCK_SIZE > ROOT_SUPER_KEY_HASH_LEN ? ROOT_SUPER_KEY_HASH_LEN : SHA256_BLOCK_SIZE;
     rc = lib_memcmp(root_superkey, hash, len);

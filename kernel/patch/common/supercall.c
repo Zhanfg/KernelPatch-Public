@@ -45,6 +45,12 @@
 
 #include <linux/umh.h>
 
+static void wipe_sensitive(void *buffer, unsigned long size)
+{
+    volatile unsigned char *p = (volatile unsigned char *)buffer;
+    while (size--) *p++ = 0;
+}
+
 static long call_test(long arg1, long arg2, long arg3)
 {
     return 0;
@@ -114,12 +120,18 @@ static long call_kpm_nums()
 
 static long call_kpm_list(char *__user names, int len)
 {
-    if (len <= 0) return -EINVAL;
-    char buf[4096];
+    if (!names || len <= 0) return -EINVAL;
+    if (len > 4096) return -E2BIG;
+
+    char buf[4096] = { 0 };
     int sz = list_modules(buf, sizeof(buf));
+    if (sz < 0) return sz;
+    if (sz > (int)sizeof(buf)) return -ENOBUFS;
     if (sz > len) return -ENOBUFS;
-    sz = compat_copy_to_user(names, buf, len);
-    return sz;
+    if (sz == 0) return 0;
+
+    /* `len` is destination capacity, never a source-read length. */
+    return compat_copy_to_user(names, buf, sz);
 }
 
 static long call_kpm_info(const char *__user uname, char *__user out_info, int out_len)
@@ -165,12 +177,24 @@ static long call_skey_get(char *__user out_key, int out_len)
     return rc;
 }
 
-static long call_skey_set(char *__user new_key)
+static long call_skey_set(const char __user *new_key)
 {
-    char buf[SUPER_KEY_LEN];
+    if (!new_key) return -EINVAL;
+
+    char buf[SUPER_KEY_LEN] = { 0 };
     int len = compat_strncpy_from_user(buf, new_key, sizeof(buf));
-    if (len >= SUPER_KEY_LEN && buf[SUPER_KEY_LEN - 1]) return -E2BIG;
-    reset_superkey(new_key);
+    if (len <= 0) {
+        wipe_sensitive(buf, sizeof(buf));
+        return -EINVAL;
+    }
+    if (len >= SUPER_KEY_LEN || buf[SUPER_KEY_LEN - 1]) {
+        wipe_sensitive(buf, sizeof(buf));
+        return -E2BIG;
+    }
+
+    /* Consume only the validated kernel copy; never re-read the user pointer. */
+    reset_superkey(buf);
+    wipe_sensitive(buf, sizeof(buf));
     return 0;
 }
 
@@ -479,7 +503,7 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
     case SUPERCALL_SKEY_GET:
         return call_skey_get((char *__user)arg1, (int)arg2);
     case SUPERCALL_SKEY_SET:
-        return call_skey_set((char *__user)arg1);
+        return call_skey_set((const char *__user)arg1);
     case SUPERCALL_SKEY_ROOT_ENABLE:
         return call_skey_root_enable((int)arg1);
         break;
@@ -538,6 +562,7 @@ static void before(hook_fargs6_t *args, void *udata)
         long len = compat_strncpy_from_user(key, key_user, MAX_KEY_LEN);
         if (len <= 0) return;
         is_authed = !auth_superkey(key);
+        wipe_sensitive(key, sizeof(key));
         is_trusted_caller = is_authed;
     }
     if (is_trusted_manager_uid(uid)) {
