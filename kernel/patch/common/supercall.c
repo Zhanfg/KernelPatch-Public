@@ -114,12 +114,17 @@ static long call_kpm_nums()
 
 static long call_kpm_list(char *__user names, int len)
 {
-    if (len <= 0) return -EINVAL;
-    char buf[4096];
+    char buf[4096] = { 0 };
+    if (!names || len <= 0) return -EINVAL;
+    if (len > (int)sizeof(buf)) return -ENOBUFS;
+
     int sz = list_modules(buf, sizeof(buf));
+    if (sz < 0) return sz;
+    if (sz > (int)sizeof(buf)) return -EOVERFLOW;
     if (sz > len) return -ENOBUFS;
-    sz = compat_copy_to_user(names, buf, len);
-    return sz;
+    if (sz == 0) return 0;
+
+    return compat_copy_to_user(names, buf, sz);
 }
 
 static long call_kpm_info(const char *__user uname, char *__user out_info, int out_len)
@@ -167,10 +172,26 @@ static long call_skey_get(char *__user out_key, int out_len)
 
 static long call_skey_set(char *__user new_key)
 {
-    char buf[SUPER_KEY_LEN];
-    int len = compat_strncpy_from_user(buf, new_key, sizeof(buf));
-    if (len >= SUPER_KEY_LEN && buf[SUPER_KEY_LEN - 1]) return -E2BIG;
-    reset_superkey(new_key);
+    char buf[SUPER_KEY_LEN] = { 0 };
+    long len = compat_strncpy_from_user(buf, new_key, sizeof(buf));
+    if (len <= 0) {
+        memzero_explicit(buf, sizeof(buf));
+        return -EINVAL;
+    }
+    if (len >= SUPER_KEY_LEN && buf[SUPER_KEY_LEN - 1]) {
+        memzero_explicit(buf, sizeof(buf));
+        return -E2BIG;
+    }
+    buf[SUPER_KEY_LEN - 1] = '\0';
+    if (!buf[0]) {
+        memzero_explicit(buf, sizeof(buf));
+        return -EINVAL;
+    }
+
+    /* Consume only the validated kernel copy. Never re-read the original
+     * userspace address after validation. */
+    reset_superkey(buf);
+    memzero_explicit(buf, sizeof(buf));
     return 0;
 }
 
@@ -353,6 +374,9 @@ static long call_umount_list(char __user *out, int size)
 
 static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, long arg4)
 {
+    /* Delegated SU callers may query basic immutable information and request
+     * elevation for their own current task. Every management/control-plane
+     * command below requires a superkey-authenticated caller or trusted manager. */
     switch (cmd) {
     case SUPERCALL_HELLO:
         logki(SUPERCALL_HELLO_ECHO "\n");
@@ -365,22 +389,25 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
         return kver;
     case SUPERCALL_BUILD_TIME:
         return call_buildtime((char *__user)arg1, (int)arg2);
-    #ifdef ANDROID
-    case SUPERCALL_AP_LOAD_PACKAGE_CONFIG:
-        return call_ap_load_package_config();
-    #endif
-    }
-
-    switch (cmd) {
     case SUPERCALL_SU:
         if (kp_safe_mode) return -EACCES;
-        return call_su((struct su_profile * __user) arg1);
+        return call_su((struct su_profile *__user)arg1);
+    default:
+        break;
+    }
+
+    if (!is_authed) return -EPERM;
+
+    switch (cmd) {
+#ifdef ANDROID
+    case SUPERCALL_AP_LOAD_PACKAGE_CONFIG:
+        return call_ap_load_package_config();
+#endif
     case SUPERCALL_SU_TASK:
         if (kp_safe_mode) return -EACCES;
-        return call_su_task((pid_t)arg1, (struct su_profile * __user) arg2);
-
+        return call_su_task((pid_t)arg1, (struct su_profile *__user)arg2);
     case SUPERCALL_SU_GRANT_UID:
-        return call_grant_uid((struct su_profile * __user) arg1);
+        return call_grant_uid((struct su_profile *__user)arg1);
     case SUPERCALL_SU_REVOKE_UID:
         return call_revoke_uid((uid_t)arg1);
     case SUPERCALL_SU_NUMS:
@@ -388,7 +415,7 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
     case SUPERCALL_SU_LIST:
         return call_su_list_allow_uid((uid_t *)arg1, (int)arg2);
     case SUPERCALL_SU_PROFILE:
-        return call_su_allow_uid_profile((uid_t)arg1, (struct su_profile * __user) arg2);
+        return call_su_allow_uid_profile((uid_t)arg1, (struct su_profile *__user)arg2);
     case SUPERCALL_SU_RESET_PATH:
         return call_reset_su_path((const char *)arg1);
     case SUPERCALL_SU_GET_PATH:
@@ -397,7 +424,6 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
         return call_su_get_allow_sctx((char *__user)arg1, (int)arg2);
     case SUPERCALL_SU_SET_ALLOW_SCTX:
         return call_su_set_allow_sctx((char *__user)arg1);
-
     case SUPERCALL_KSTORAGE_READ:
         return call_kstorage_read((int)arg1, (long)arg2, (void *)arg3, (int)((long)arg4 >> 32), (long)arg4 << 32 >> 32);
     case SUPERCALL_KSTORAGE_WRITE:
@@ -407,13 +433,10 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
         return call_list_kstorage_ids((int)arg1, (long *)arg2, (int)arg3);
     case SUPERCALL_KSTORAGE_REMOVE:
         return call_kstorage_remove((int)arg1, (long)arg2);
-
 #ifdef ANDROID
     case SUPERCALL_SU_GET_SAFEMODE:
         return call_su_get_safemode();
 #endif
-
-    /* App profile system */
     case SUPERCALL_APP_PROFILE_GET:
         return call_app_profile_get((uid_t)arg1, (struct app_profile __user *)arg2);
     case SUPERCALL_APP_PROFILE_SET:
@@ -422,12 +445,8 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
         return call_app_profile_list((uid_t __user *)arg1, (int)arg2);
     case SUPERCALL_APP_PROFILE_NUM:
         return app_profile_num();
-
-    /* Safe mode */
     case SUPERCALL_SET_SAFEMODE:
         return call_set_safemode((int)arg1);
-
-    /* Umount/hiding config */
     case SUPERCALL_UMOUNT_ADD:
         return call_umount_add((const char __user *)arg1, (unsigned int)arg2);
     case SUPERCALL_UMOUNT_REMOVE:
@@ -437,16 +456,12 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
         return 0;
     case SUPERCALL_UMOUNT_LIST:
         return call_umount_list((char __user *)arg1, (int)arg2);
-
-    /* Process hiding */
     case SUPERCALL_PROC_RENAME: {
         char name[16];
         int len = compat_strncpy_from_user(name, (const char __user *)arg1, sizeof(name));
         if (len <= 0) return -EINVAL;
         return proc_hide_rename_current(name);
     }
-
-    /* KPM safety / crash protection */
     case SUPERCALL_SAFETY_BL_CLEAR:
         kpm_safety_clear_blacklist();
         return 0;
@@ -457,35 +472,18 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
         kpm_safety_add_to_blacklist(name);
         return 0;
     }
-
-    default:
-        break;
-    }
-
-    switch (cmd) {
     case SUPERCALL_BOOTLOG:
         return call_bootlog();
     case SUPERCALL_PANIC:
         return call_panic();
     case SUPERCALL_TEST:
         return call_test(arg1, arg2, arg3);
-    default:
-        break;
-    }
-
-    if (!is_authed) return -EPERM;
-
-    switch (cmd) {
     case SUPERCALL_SKEY_GET:
         return call_skey_get((char *__user)arg1, (int)arg2);
     case SUPERCALL_SKEY_SET:
         return call_skey_set((char *__user)arg1);
     case SUPERCALL_SKEY_ROOT_ENABLE:
         return call_skey_root_enable((int)arg1);
-        break;
-    }
-
-    switch (cmd) {
     case SUPERCALL_KPM_LOAD:
         return call_kpm_load((const char *__user)arg1, (const char *__user)arg2, (void *__user)arg3);
     case SUPERCALL_KPM_UNLOAD:
@@ -498,29 +496,20 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
         return call_kpm_list((char *__user)arg1, (int)arg2);
     case SUPERCALL_KPM_INFO:
         return call_kpm_info((const char *__user)arg1, (char *__user)arg2, (int)arg3);
-
-    /* KPM event dispatch (authed) */
     case SUPERCALL_KPM_EVENT:
         return call_kpm_event((int)arg1, (const char __user *)arg2, (const char __user *)arg3);
-
-    /* SELinux policy operations (authed only) */
     case SUPERCALL_SEPOLICY_CMD:
         return sepolicy_apply((const void __user *)arg1, (int)arg2);
-    }
-
-    switch (cmd) {
     default:
-        break;
+        return -ENOSYS;
     }
-
-    return -ENOSYS;
 }
 
 int is_trusted_manager_uid(uid_t uid)
 {
-    #ifdef ANDROID
+#ifdef ANDROID
     return is_trusted_manager_uid_android(uid);
-    #endif
+#endif
     return 0;
 }
 
@@ -533,11 +522,12 @@ static void before(hook_fargs6_t *args, void *udata)
     int is_authed = 0;
     if (has_preset_superkey()) {
         const char *__user key_user = (const char *__user)syscall_argn(args, 0);
-        
+
         char key[MAX_KEY_LEN];
         long len = compat_strncpy_from_user(key, key_user, MAX_KEY_LEN);
         if (len <= 0) return;
         is_authed = !auth_superkey(key);
+        memzero_explicit(key, sizeof(key));
         is_trusted_caller = is_authed;
     }
     if (is_trusted_manager_uid(uid)) {
