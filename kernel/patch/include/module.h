@@ -10,6 +10,14 @@
 #include <kpmodule.h>
 #include <uapi/kpm_event.h>
 
+enum module_state {
+    MODULE_STATE_LOADING = 0,
+    MODULE_STATE_LIVE,
+    MODULE_STATE_QUIESCING,
+    MODULE_STATE_UNLOADING,
+    MODULE_STATE_DEAD,
+};
+
 struct load_info
 {
     struct
@@ -42,13 +50,17 @@ struct module
     mod_ctl0call_t *ctl0;
     mod_ctl1call_t *ctl1;
     mod_exitcall_t *exit;
-    mod_eventcall_t *event;  /* structured event callback (optional) */
+    mod_eventcall_t *event;
 
     unsigned int size;
     unsigned int text_size;
     unsigned int ro_size;
 
     void *start;
+    void *info_storage;
+
+    enum module_state state;
+    unsigned int active_refs;
 
     struct list_head list;
 };
@@ -58,16 +70,16 @@ long load_module_path(const char *path, const char *args, void *__user reserved)
 long module_control0(const char *name, const char *ctl_args, char *__user out_msg, int outlen);
 long module_control1(const char *name, void *a1, void *a2, void *a3);
 long unload_module(const char *name, void *__user reserved);
+
+/* find_module() now returns a retained LIVE module; caller must put_module(). */
 struct module *find_module(const char *name);
+void put_module(struct module *mod);
 
 int get_module_nums();
 int list_modules(char *out_names, int size);
 int get_module_info(const char *name, char *out_info, int size);
 
-/* Event dispatch — forwards event to all loaded KPM modules */
 int module_dispatch_event(enum kpm_event event, const char *source_name, const char *args);
-
-/* Compact symbol resolver init */
 void compact_init(void);
 
 #endif
