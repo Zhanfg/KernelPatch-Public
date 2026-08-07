@@ -16,7 +16,11 @@ void kpm_safety_early_count(void);
 void kpm_safety_confirm_boot(void);
 void kpm_safety_confirm_boot_completed(void);
 
-/* Pre-load ELF validation */
+/*
+ * Basic ELF identity/header sanity only. Untrusted section, string, symbol,
+ * relocation and size metadata are validated by module.c::validate_elf_structure()
+ * before setup_load_info() is allowed to consume them.
+ */
 int kpm_safety_validate(const void *data, int len);
 
 /* Blacklist check: returns 1 if KPM should be skipped */
