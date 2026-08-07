@@ -32,6 +32,7 @@
 #include <accctl.h>
 
 #define SZ_128M 0x08000000
+#define MAX_KPM_SECTIONS 4096
 
 #define ALIGN_MASK(x, mask) (((x) + (mask)) & ~(mask))
 #define ALIGN(x, a) ALIGN_MASK(x, (typeof(x))(a)-1)
@@ -45,6 +46,99 @@
 static inline bool strstarts(const char *str, const char *prefix)
 {
     return strncmp(str, prefix, strlen(prefix)) == 0;
+}
+
+static bool file_range_valid(const struct load_info *info, unsigned long offset, unsigned long size)
+{
+    if (!info || info->len < 0) return false;
+    if (offset > (unsigned long)info->len) return false;
+    return size <= (unsigned long)info->len - offset;
+}
+
+static bool string_offset_valid(const char *table, unsigned long table_size, unsigned long offset)
+{
+    if (!table || offset >= table_size) return false;
+    return memchr(table + offset, '\0', table_size - offset) != NULL;
+}
+
+static bool valid_alignment(unsigned long alignment)
+{
+    if (!alignment) return true;
+    if (alignment > SZ_128M) return false;
+    return (alignment & (alignment - 1)) == 0;
+}
+
+static int validate_section_table(struct load_info *info)
+{
+    if (!info || !info->hdr || !info->sechdrs) return -ENOEXEC;
+    if (!info->hdr->e_shnum || info->hdr->e_shnum > MAX_KPM_SECTIONS) return -ENOEXEC;
+    if (info->hdr->e_shstrndx >= info->hdr->e_shnum) return -ENOEXEC;
+
+    Elf_Shdr *shstr = &info->sechdrs[info->hdr->e_shstrndx];
+    if (shstr->sh_type != SHT_STRTAB || !shstr->sh_size ||
+        !file_range_valid(info, shstr->sh_offset, shstr->sh_size)) {
+        return -ENOEXEC;
+    }
+    const char *section_names = (const char *)info->hdr + shstr->sh_offset;
+
+    unsigned long alloc_budget = 0;
+    for (int i = 0; i < info->hdr->e_shnum; i++) {
+        Elf_Shdr *shdr = &info->sechdrs[i];
+        if (shdr->sh_type != SHT_NOBITS && !file_range_valid(info, shdr->sh_offset, shdr->sh_size)) {
+            return -ENOEXEC;
+        }
+        if (!valid_alignment(shdr->sh_addralign)) return -ENOEXEC;
+        if (!string_offset_valid(section_names, shstr->sh_size, shdr->sh_name)) return -ENOEXEC;
+
+        if (shdr->sh_flags & SHF_ALLOC) {
+            unsigned long alignment = shdr->sh_addralign ?: 1;
+            unsigned long padding = alignment - 1;
+            if (padding > SZ_128M - alloc_budget) return -E2BIG;
+            alloc_budget += padding;
+            if (shdr->sh_size > SZ_128M - alloc_budget) return -E2BIG;
+            alloc_budget += shdr->sh_size;
+        }
+
+        if (shdr->sh_type == SHT_SYMTAB) {
+            if (shdr->sh_entsize != sizeof(Elf_Sym) || shdr->sh_size % sizeof(Elf_Sym)) return -ENOEXEC;
+            if (shdr->sh_link >= info->hdr->e_shnum) return -ENOEXEC;
+            Elf_Shdr *strtab = &info->sechdrs[shdr->sh_link];
+            if (strtab->sh_type != SHT_STRTAB || !strtab->sh_size ||
+                !file_range_valid(info, strtab->sh_offset, strtab->sh_size)) {
+                return -ENOEXEC;
+            }
+        } else if (shdr->sh_type == SHT_REL || shdr->sh_type == SHT_RELA) {
+            if (shdr->sh_link >= info->hdr->e_shnum || shdr->sh_info >= info->hdr->e_shnum) return -ENOEXEC;
+            if (info->sechdrs[shdr->sh_link].sh_type != SHT_SYMTAB) return -ENOEXEC;
+            unsigned long expected = shdr->sh_type == SHT_RELA ? sizeof(Elf_Rela) : sizeof(Elf_Rel);
+            if (shdr->sh_entsize != expected || shdr->sh_size % expected) return -ENOEXEC;
+        }
+    }
+    return 0;
+}
+
+static int validate_symbol_table(struct load_info *info)
+{
+    if (!info->index.sym || info->index.sym >= info->hdr->e_shnum ||
+        !info->index.str || info->index.str >= info->hdr->e_shnum) {
+        return -ENOEXEC;
+    }
+
+    Elf_Shdr *symsec = &info->sechdrs[info->index.sym];
+    Elf_Shdr *strsec = &info->sechdrs[info->index.str];
+    Elf_Sym *symbols = (void *)info->hdr + symsec->sh_offset;
+    const char *strtab = (const char *)info->hdr + strsec->sh_offset;
+    unsigned long count = symsec->sh_size / sizeof(Elf_Sym);
+
+    for (unsigned long i = 0; i < count; i++) {
+        if (!string_offset_valid(strtab, strsec->sh_size, symbols[i].st_name)) return -ENOEXEC;
+        unsigned int section = symbols[i].st_shndx;
+        if (section != SHN_UNDEF && section != SHN_ABS && section != SHN_COMMON &&
+            section >= info->hdr->e_shnum) {
+            return -ENOEXEC;
+        }
+    }
+    return 0;
 }
 
 static char *next_string(char *string, unsigned long *secsize)
@@ -119,7 +213,6 @@ static unsigned long get_sh_size(struct load_info *info, const char *secname)
 static void layout_sections(struct module *mod, struct load_info *info)
 {
     static unsigned long const masks[][2] = {
-        /* NOTE: all executable code must be the first section in this array; otherwise modify the text_size finder in the two loops below */
         { SHF_EXECINSTR | SHF_ALLOC, ARCH_SHF_SMALL },
         { SHF_ALLOC, SHF_WRITE | ARCH_SHF_SMALL },
         { SHF_WRITE | SHF_ALLOC, ARCH_SHF_SMALL },
@@ -129,27 +222,25 @@ static void layout_sections(struct module *mod, struct load_info *info)
     for (int i = 0; i < info->hdr->e_shnum; i++)
         info->sechdrs[i].sh_entsize = ~0UL;
 
-    // todo: tslf alloc all rwx and not page aligned
     for (int m = 0; m < sizeof(masks) / sizeof(masks[0]); ++m) {
         for (int i = 0; i < info->hdr->e_shnum; ++i) {
             Elf_Shdr *s = &info->sechdrs[i];
             if ((s->sh_flags & masks[m][0]) != masks[m][0] || (s->sh_flags & masks[m][1]) || s->sh_entsize != ~0UL)
                 continue;
             s->sh_entsize = get_offset(mod, &mod->size, s, i);
-            // const char *sname = info->secstrings + s->sh_name;
         }
         switch (m) {
-        case 0: /* executable */
+        case 0:
             mod->size = align(mod->size);
             mod->text_size = mod->size;
             break;
-        case 1: /* RO: text and ro-data */
+        case 1:
             mod->size = align(mod->size);
             mod->ro_size = mod->size;
             break;
         case 2:
             break;
-        case 3: /* whole */
+        case 3:
             mod->size = align(mod->size);
             break;
         }
@@ -165,7 +256,6 @@ static bool is_core_symbol(const Elf_Sym *src, const Elf_Shdr *sechdrs, unsigned
     return true;
 }
 
-/* Change all symbols so that st_value encodes the pointer directly. */
 static int simplify_symbols(struct module *mod, const struct load_info *info)
 {
     Elf_Shdr *symsec = &info->sechdrs[info->index.sym];
@@ -185,9 +275,8 @@ static int simplify_symbols(struct module *mod, const struct load_info *info)
             break;
         case SHN_ABS:
             break;
-        case SHN_UNDEF:
+        case SHN_UNDEF: {
             unsigned long addr = symbol_lookup_name(name);
-            /* Fallback: try compact resolver (exposes kernel + KP symbols to KPM) */
             if (!addr) addr = compact_find_symbol(name);
             if (!addr) {
                 logke("unknown symbol: %s\n", name);
@@ -196,6 +285,7 @@ static int simplify_symbols(struct module *mod, const struct load_info *info)
             }
             sym[i].st_value = addr;
             break;
+        }
         default:
             secbase = info->sechdrs[sym[i].st_shndx].sh_addr;
             sym[i].st_value += secbase;
@@ -223,7 +313,6 @@ static int apply_relocations(struct module *mod, const struct load_info *info)
     return rc;
 }
 
-// todo: free .strtab and .symtab after relocation
 static void layout_symtab(struct module *mod, struct load_info *info)
 {
     Elf_Shdr *symsect = info->sechdrs + info->index.sym;
@@ -231,16 +320,13 @@ static void layout_symtab(struct module *mod, struct load_info *info)
     const Elf_Sym *src;
     unsigned int i, nsrc, ndst, strtab_size = 0;
 
-    /* Put symbol section at end of module. */
     symsect->sh_flags |= SHF_ALLOC;
     symsect->sh_entsize = get_offset(mod, &mod->size, symsect, info->index.sym);
 
     src = (void *)info->hdr + symsect->sh_offset;
     nsrc = symsect->sh_size / sizeof(*src);
 
-    /* strtab always starts with a nul, so offset 0 is the empty string. */
     strtab_size = 1;
-    /* Compute total space required for the core symbols' strtab. */
     for (ndst = i = 0; i < nsrc; i++) {
         if (i == 0 || is_core_symbol(src + i, info->sechdrs, info->hdr->e_shnum)) {
             strtab_size += strlen(&info->strtab[src[i].st_name]) + 1;
@@ -248,12 +334,10 @@ static void layout_symtab(struct module *mod, struct load_info *info)
         }
     }
 
-    /* Append room for core symbols at end. */
     info->symoffs = ALIGN(mod->size, symsect->sh_addralign ?: 1);
     info->stroffs = mod->size = info->symoffs + ndst * sizeof(Elf_Sym);
     mod->size += strtab_size;
 
-    /* Put string table section at end of module. */
     strsect->sh_flags |= SHF_ALLOC;
     strsect->sh_entsize = get_offset(mod, &mod->size, strsect, info->index.str);
 }
@@ -263,10 +347,9 @@ static int rewrite_section_headers(struct load_info *info)
     info->sechdrs[0].sh_addr = 0;
     for (int i = 1; i < info->hdr->e_shnum; i++) {
         Elf_Shdr *shdr = &info->sechdrs[i];
-        if (shdr->sh_type != SHT_NOBITS && info->len < shdr->sh_offset + shdr->sh_size) {
+        if (shdr->sh_type != SHT_NOBITS && !file_range_valid(info, shdr->sh_offset, shdr->sh_size)) {
             return -ENOEXEC;
         }
-        /* Mark all sections sh_addr with their address in the temporary image. */
         shdr->sh_addr = (size_t)info->hdr + shdr->sh_offset;
     }
     return 0;
@@ -274,17 +357,12 @@ static int rewrite_section_headers(struct load_info *info)
 
 static int move_module(struct module *mod, struct load_info *info)
 {
-    // todo:
     logki("alloc module size: %llx\n", mod->size);
     mod->start = kp_malloc_exec(mod->size);
-    if (!mod->start) {
-        return -ENOMEM;
-    }
+    if (!mod->start) return -ENOMEM;
     memset(mod->start, 0, mod->size);
 
-    /* Transfer each section which specifies SHF_ALLOC */
     logkd("final section addresses:\n");
-
     for (int i = 1; i < info->hdr->e_shnum; i++) {
         void *dest;
         Elf_Shdr *shdr = &info->sechdrs[i];
@@ -292,49 +370,34 @@ static int move_module(struct module *mod, struct load_info *info)
 
         dest = mod->start + shdr->sh_entsize;
         const char *sname = info->secstrings + shdr->sh_name;
-
         logkd("    %s %llx %llx\n", sname, dest, shdr->sh_size);
 
         if (shdr->sh_type != SHT_NOBITS) memcpy(dest, (void *)shdr->sh_addr, shdr->sh_size);
-
         shdr->sh_addr = (unsigned long)dest;
 
         if (!mod->init && !strcmp(".kpm.init", sname)) mod->init = (mod_initcall_t *)dest;
-        /* .ko format: accept standard .init.text/.exit.text */
-        if (!mod->init && !strcmp(".init.text", sname)) mod->init = (mod_initcall_t *)dest;
-
         if (!strcmp(".kpm.ctl0", sname)) mod->ctl0 = (mod_ctl0call_t *)dest;
         if (!strcmp(".kpm.ctl1", sname)) mod->ctl1 = (mod_ctl1call_t *)dest;
-
         if (!mod->exit && !strcmp(".kpm.exit", sname)) mod->exit = (mod_exitcall_t *)dest;
-        /* .ko format: accept standard .exit.text */
-        if (!mod->exit && !strcmp(".exit.text", sname)) mod->exit = (mod_exitcall_t *)dest;
-
         if (!mod->event && !strcmp(".kpm.event", sname)) mod->event = (mod_eventcall_t *)dest;
-
         if (!mod->info.base && !strcmp(".kpm.info", sname)) mod->info.base = (const char *)dest;
     }
 
-    /* For .ko/.o without .kpm.info, metadata is static (from setup_load_info).
-     * Use the strings directly — they point to the original ELF data (still valid). */
     if (info->info.base) {
-        /* KPM format: compute relocated offsets */
         mod->info.name = info->info.name - info->info.base + mod->info.base;
         mod->info.version = info->info.version - info->info.base + mod->info.base;
         if (info->info.license) mod->info.license = info->info.license - info->info.base + mod->info.base;
         if (info->info.author) mod->info.author = info->info.author - info->info.base + mod->info.base;
         if (info->info.description) mod->info.description = info->info.description - info->info.base + mod->info.base;
     } else {
-        /* .ko/.o format: metadata strings point into original ELF data.
-         * Copy into per-module allocated buffers since original data is freed after load. */
-        char *buf = vmalloc(320); /* 64+32+32+64+128 = 320 */
+        char *buf = vmalloc(320);
         if (buf) {
             memset(buf, 0, 320);
             strncpy(buf, info->info.name ?: "unknown", 63);
             strncpy(buf + 64, info->info.version ?: "0.0.0", 31);
             strncpy(buf + 96, info->info.license ?: "unknown", 31);
             strncpy(buf + 128, info->info.author ?: "unknown", 63);
-            strncpy(buf + 192, info->info.description ?: "loaded from .ko", 127);
+            strncpy(buf + 192, info->info.description ?: "loaded without .kpm.info", 127);
             mod->info.name = buf;
             mod->info.version = buf + 64;
             mod->info.license = buf + 96;
@@ -363,54 +426,26 @@ static int setup_load_info(struct load_info *info)
         return rc;
     }
 
-    int has_kpm_init = find_sec(info, ".kpm.init") || find_sec(info, ".kpm.exit");
-    int has_ko_init = find_sec(info, ".init.text") || find_sec(info, ".exit.text");
-
-    if (!has_kpm_init && !has_ko_init) {
-        logke("no .kpm.init/.kpm.exit or .init.text/.exit.text section\n");
+    int init_idx = find_sec(info, ".kpm.init");
+    if (!init_idx || info->sechdrs[init_idx].sh_size < sizeof(void *)) {
+        logke("KPM requires a valid .kpm.init callback slot\n");
+        return -ENOEXEC;
+    }
+    int exit_idx = find_sec(info, ".kpm.exit");
+    if (exit_idx && info->sechdrs[exit_idx].sh_size < sizeof(void *)) {
+        logke("invalid .kpm.exit callback slot\n");
         return -ENOEXEC;
     }
 
-    /* .ko format: parse .modinfo for metadata */
-    if (!has_kpm_init && has_ko_init) {
-        int modinfo_idx = find_sec(info, ".modinfo");
-        if (modinfo_idx) {
-            /* Temporarily set index.info to .modinfo for get_modinfo() */
-            info->index.info = modinfo_idx;
-            info->info.base = get_sh_base(info, ".modinfo");
-            info->info.size = get_sh_size(info, ".modinfo");
-
-            info->info.name = get_modinfo(info, "name");
-            if (!info->info.name) info->info.name = "unknown.ko";
-            info->info.version = get_modinfo(info, "version");
-            if (!info->info.version) info->info.version = "0.0.0";
-            info->info.license = get_modinfo(info, "license");
-            if (!info->info.license) info->info.license = "unknown";
-            info->info.author = get_modinfo(info, "author");
-            if (!info->info.author) info->info.author = "unknown";
-            info->info.description = get_modinfo(info, "description");
-            if (!info->info.description) info->info.description = "loaded from .ko";
-        } else {
-            info->index.info = 0;
-            info->info.name = "unknown.ko";
-            info->info.version = "0.0.0";
-            info->info.license = "unknown";
-            info->info.author = "unknown";
-            info->info.description = "loaded from .ko";
-        }
-        logkd("loading .ko: name=%s version=%s license=%s\n",
-              info->info.name, info->info.version, info->info.license);
-        goto find_symtab;
-    }
-
+    /* Ordinary .ko/.o .init.text section starts are not a KPM callback ABI.
+     * Only explicit KPM callback sections are accepted. */
     info->index.info = find_sec(info, ".kpm.info");
     if (!info->index.info) {
-        /* .o file without .kpm.info — auto-generate metadata */
         info->info.name = "unknown.o";
         info->info.version = "0.0.0";
         info->info.license = "unknown";
         info->info.author = "unknown";
-        info->info.description = "loaded from .o";
+        info->info.description = "loaded without .kpm.info";
         goto find_symtab;
     }
     info->info.base = get_sh_base(info, ".kpm.info");
@@ -433,19 +468,14 @@ static int setup_load_info(struct load_info *info)
     info->info.version = version;
     logkd("    version: %s\n", version);
 
-    const char *license = get_modinfo(info, "license");
-    info->info.license = license;
-    logkd("    license: %s\n", license);
-
-    const char *author = get_modinfo(info, "author");
-    info->info.author = author;
-    logkd("    author: %s\n", author);
-    const char *description = get_modinfo(info, "description");
-    info->info.description = description;
-    logkd("    description: %s\n", description);
+    info->info.license = get_modinfo(info, "license");
+    logkd("    license: %s\n", info->info.license);
+    info->info.author = get_modinfo(info, "author");
+    logkd("    author: %s\n", info->info.author);
+    info->info.description = get_modinfo(info, "description");
+    logkd("    description: %s\n", info->info.description);
 
 find_symtab:
-
     for (int i = 1; i < info->hdr->e_shnum; i++) {
         if (info->sechdrs[i].sh_type == SHT_SYMTAB) {
             info->index.sym = i;
@@ -459,22 +489,73 @@ find_symtab:
         logkd("module has no symbols (stripped?)\n");
         return -ENOEXEC;
     }
-    return 0;
+    return validate_symbol_table(info);
 }
 
 static int elf_header_check(struct load_info *info)
 {
-    if (info->len <= sizeof(*(info->hdr))) return -ENOEXEC;
+    if (!info || !info->hdr || info->len <= (int)sizeof(*(info->hdr)) || info->len > SZ_128M) return -ENOEXEC;
     if (memcmp(info->hdr->e_ident, ELFMAG, SELFMAG) || info->hdr->e_type != ET_REL || !elf_check_arch(info->hdr) ||
-        info->hdr->e_shentsize != sizeof(Elf_Shdr))
+        info->hdr->e_shentsize != sizeof(Elf_Shdr)) {
         return -ENOEXEC;
-    if (info->hdr->e_shoff >= info->len || (info->hdr->e_shnum * sizeof(Elf_Shdr) > info->len - info->hdr->e_shoff))
+    }
+    if (!info->hdr->e_shnum || info->hdr->e_shnum > MAX_KPM_SECTIONS) return -ENOEXEC;
+    if (info->hdr->e_shoff >= (unsigned long)info->len ||
+        info->hdr->e_shnum * sizeof(Elf_Shdr) > (unsigned long)info->len - info->hdr->e_shoff) {
         return -ENOEXEC;
+    }
+
+    info->sechdrs = (void *)info->hdr + info->hdr->e_shoff;
+    return validate_section_table(info);
+}
+
+static bool module_slot_valid(const struct module *mod, const void *slot)
+{
+    uintptr_t start = (uintptr_t)mod->start;
+    uintptr_t addr = (uintptr_t)slot;
+    if (!slot || addr < start || mod->size < sizeof(void *)) return false;
+    return addr - start <= mod->size - sizeof(void *);
+}
+
+static bool module_callback_valid(const struct module *mod, uintptr_t callback)
+{
+    uintptr_t start = (uintptr_t)mod->start;
+    if (!callback || callback < start) return false;
+    return callback - start < mod->text_size;
+}
+
+static int validate_module_callbacks(const struct module *mod)
+{
+    if (!mod->init || !module_slot_valid(mod, mod->init) || !*mod->init ||
+        !module_callback_valid(mod, (uintptr_t)*mod->init)) {
+        logke("invalid or missing KPM init callback\n");
+        return -ENOEXEC;
+    }
+    if (mod->exit && (!module_slot_valid(mod, mod->exit) || !*mod->exit ||
+                      !module_callback_valid(mod, (uintptr_t)*mod->exit))) {
+        logke("invalid KPM exit callback\n");
+        return -ENOEXEC;
+    }
+    if (mod->ctl0 && (!module_slot_valid(mod, mod->ctl0) || !*mod->ctl0 ||
+                      !module_callback_valid(mod, (uintptr_t)*mod->ctl0))) return -ENOEXEC;
+    if (mod->ctl1 && (!module_slot_valid(mod, mod->ctl1) || !*mod->ctl1 ||
+                      !module_callback_valid(mod, (uintptr_t)*mod->ctl1))) return -ENOEXEC;
+    if (mod->event && (!module_slot_valid(mod, mod->event) || !*mod->event ||
+                       !module_callback_valid(mod, (uintptr_t)*mod->event))) return -ENOEXEC;
     return 0;
 }
 
 struct module modules = { 0 };
 static spinlock_t module_lock;
+
+struct module *find_module(const char *name)
+{
+    struct module *pos;
+    list_for_each_entry_rcu(pos, &modules.list, list) {
+        if (!strcmp(name, pos->info.name)) return pos;
+    }
+    return 0;
+}
 
 long load_module(const void *data, int len, const char *args, const char *event, void *__user reserved)
 {
@@ -485,24 +566,20 @@ long load_module(const void *data, int len, const char *args, const char *event,
     if ((rc = elf_header_check(info))) goto out;
     if ((rc = setup_load_info(info))) goto out;
 
-    /* Safety: check blacklist */
     if (kpm_safety_check_blacklist(info->info.name)) {
         logkfe("kpm_safety: skipping blacklisted module %s\n", info->info.name);
         rc = -EACCES;
         goto out;
     }
-
-    /* Safety: validate ELF structure */
     if ((rc = kpm_safety_validate(data, len))) {
         logkfe("kpm_safety: validation failed for %s\n", info->info.name);
         goto out;
     }
 
-    if (find_module(info->info.name)) {
-        logkfd("%s exist\n", info->info.name);
-        rc = -EEXIST;
-        goto out;
-    }
+    rcu_read_lock();
+    if (find_module(info->info.name)) rc = -EEXIST;
+    rcu_read_unlock();
+    if (rc) goto out;
 
     struct module *mod = (struct module *)vmalloc(sizeof(struct module));
     if (!mod) return -ENOMEM;
@@ -523,22 +600,29 @@ long load_module(const void *data, int len, const char *args, const char *event,
     if ((rc = move_module(mod, info))) goto free;
     if ((rc = simplify_symbols(mod, info))) goto free;
     if ((rc = apply_relocations(mod, info))) goto free;
+    if ((rc = validate_module_callbacks(mod))) goto free;
 
     flush_icache_all();
-
-    /* Mark this KPM as loading (for crash detection) */
     kpm_safety_mark_loading(info->info.name);
 
     rc = (*mod->init)(mod->args, event, reserved);
-
     if (!rc) {
+        unsigned long flags;
+        spin_lock_irqsave(&module_lock, flags);
+        if (find_module(info->info.name)) {
+            spin_unlock_irqrestore(&module_lock, flags);
+            rc = -EEXIST;
+            if (mod->exit && *mod->exit) (*mod->exit)(reserved);
+            goto free;
+        }
+        list_add_tail_rcu(&mod->list, &modules.list);
+        spin_unlock_irqrestore(&module_lock, flags);
         logkfi("[%s] succeed with [%s] \n", mod->info.name, args);
-        list_add_tail(&mod->list, &modules.list);
         goto out;
-    } else {
-        logkfi("[%s] failed with [%s] error: %d, try exit ...\n", mod->info.name, args, rc);
-        (*mod->exit)(reserved);
     }
+
+    logkfi("[%s] failed with [%s] error: %d, try exit ...\n", mod->info.name, args, rc);
+    if (mod->exit && *mod->exit) (*mod->exit)(reserved);
 
 free:
     if (mod->args) kvfree(mod->args);
@@ -549,35 +633,35 @@ out:
     return rc;
 }
 
-// todo: lock
 long unload_module(const char *name, void *__user reserved)
 {
     if (!name) return -EINVAL;
     logkfe("name: %s\n", name);
 
-    rcu_read_lock();
+    unsigned long flags;
     long rc = 0;
+    struct module *mod = 0;
 
-    struct module *mod = find_module(name);
+    spin_lock_irqsave(&module_lock, flags);
+    mod = find_module(name);
     if (!mod) {
-        rc = -ENOENT;
-        goto out;
+        spin_unlock_irqrestore(&module_lock, flags);
+        return -ENOENT;
     }
-    list_del(&mod->list);
-    if (mod->exit && *mod->exit) {
-        rc = (*mod->exit)(reserved);
-    }
+    list_del_rcu(&mod->list);
+    spin_unlock_irqrestore(&module_lock, flags);
 
+    /* Every control/event/info reader executes under rcu_read_lock(). Wait for
+     * those callbacks to finish before invoking exit or reclaiming code/data. */
+    synchronize_rcu();
+
+    if (mod->exit && *mod->exit) rc = (*mod->exit)(reserved);
     if (mod->args) kvfree(mod->args);
     if (mod->ctl_args) kvfree(mod->ctl_args);
-
     kp_free_exec(mod->start);
     kvfree(mod);
 
     logkfi("name: %s, rc: %d\n", name, rc);
-
-out:
-    rcu_read_unlock();
     return rc;
 }
 
@@ -595,11 +679,17 @@ long load_module_path(const char *path, const char *args, void *__user reserved)
     }
     loff_t len = vfs_llseek(filp, 0, SEEK_END);
     logkfd("module size: %llx\n", len);
+    if (len <= 0 || len > SZ_128M) {
+        rc = -E2BIG;
+        filp_close(filp, 0);
+        goto out;
+    }
     vfs_llseek(filp, 0, SEEK_SET);
 
     void *data = vmalloc(len);
     if (!data) {
         rc = -ENOMEM;
+        filp_close(filp, 0);
         goto out;
     }
     memset(data, 0, len);
@@ -628,37 +718,27 @@ long module_control0(const char *name, const char *ctl_args, char *__user out_ms
     if (args_len <= 0) return -EINVAL;
 
     logkfi("name %s, args: %s\n", name, ctl_args);
+    char *local_args = vmalloc(args_len + 1);
+    if (!local_args) return -ENOMEM;
+    strcpy(local_args, ctl_args);
 
     long rc = 0;
     rcu_read_lock();
-
     struct module *mod = find_module(name);
     if (!mod) {
         rc = -ENOENT;
         goto out;
     }
-
     if (!mod->ctl0 || !*mod->ctl0) {
-        logkfe("no ctl0\n");
         rc = -ENOSYS;
         goto out;
     }
 
-    if (mod->ctl_args) kvfree(mod->ctl_args);
-
-    mod->ctl_args = vmalloc(args_len + 1);
-    if (!mod->ctl_args) {
-        rc = -ENOMEM;
-        goto out;
-    }
-
-    strcpy(mod->ctl_args, ctl_args);
-
-    rc = (*mod->ctl0)(mod->ctl_args, out_msg, outlen);
-
+    rc = (*mod->ctl0)(local_args, out_msg, outlen);
     logkfi("name: %s, rc: %d\n", name, rc);
 out:
     rcu_read_unlock();
+    kvfree(local_args);
     return rc;
 }
 
@@ -673,74 +753,75 @@ long module_control1(const char *name, void *a1, void *a2, void *a3)
         rc = -ENOENT;
         goto out;
     }
-
     if (!mod->ctl1 || !*mod->ctl1) {
-        logkfe("no ctl1\n");
         rc = -ENOSYS;
         goto out;
     }
 
     rc = (*mod->ctl1)(a1, a2, a3);
-
     logkfi("name: %s, rc: %d\n", name, rc);
 out:
     rcu_read_unlock();
     return rc;
 }
 
-struct module *find_module(const char *name)
-{
-    struct module *pos;
-    list_for_each_entry(pos, &modules.list, list)
-    {
-        if (!strcmp(name, pos->info.name)) {
-            return pos;
-        }
-    }
-    return 0;
-}
-
 int get_module_nums()
 {
     rcu_read_lock();
-
     struct module *pos;
     int n = 0;
-    list_for_each_entry(pos, &modules.list, list)
-    {
-        n++;
-    }
+    list_for_each_entry_rcu(pos, &modules.list, list) n++;
     rcu_read_unlock();
-
     logkfd("%d\n", n);
     return n;
 }
 
 int list_modules(char *out_names, int size)
 {
-    rcu_read_lock();
+    if (!out_names || size <= 0) return -EINVAL;
+    out_names[0] = '\0';
 
-    struct module *pos;
+    int rc = 0;
     int off = 0;
-    list_for_each_entry(pos, &modules.list, list)
-    {
-        off += snprintf(out_names + off, size - 1 - off, "%s\n", pos->info.name);
+    rcu_read_lock();
+    struct module *pos;
+    list_for_each_entry_rcu(pos, &modules.list, list) {
+        int remaining = size - off;
+        if (remaining <= 1) {
+            rc = -ENOBUFS;
+            goto out;
+        }
+        int written = snprintf(out_names + off, remaining, "%s\n", pos->info.name);
+        if (written < 0) {
+            rc = written;
+            goto out;
+        }
+        if (written >= remaining) {
+            rc = -ENOBUFS;
+            goto out;
+        }
+        off += written;
     }
     if (off > 0) out_names[off - 1] = '\0';
-
+    rc = off;
+out:
     rcu_read_unlock();
-    return off;
+    return rc;
 }
 
 int get_module_info(const char *name, char *out_info, int size)
 {
-    if (size <= 0) return 0;
+    if (!name || !out_info || size <= 0) return -EINVAL;
+
+    int rc = 0;
     rcu_read_lock();
-
     struct module *mod = find_module(name);
-    if (!mod) return -ENOENT;
+    if (!mod) {
+        rc = -ENOENT;
+        goto out;
+    }
 
-    int sz = snprintf(out_info, size - 1,
+    int sz = snprintf(out_info, size,
                       "name=%s\n"
                       "version=%s\n"
                       "license=%s\n"
@@ -753,12 +834,20 @@ int get_module_info(const char *name, char *out_info, int size)
                       mod->info.author ?: "unknown",
                       mod->info.description ?: "",
                       mod->args ?: "");
-
-    if (sz > 0) out_info[sz - 1] = '\0';
+    if (sz < 0) {
+        rc = sz;
+        goto out;
+    }
+    if (sz >= size) {
+        out_info[size - 1] = '\0';
+        rc = -ENOBUFS;
+        goto out;
+    }
     logkfd("%s", out_info);
-
+    rc = sz;
+out:
     rcu_read_unlock();
-    return sz;
+    return rc;
 }
 
 void module_init()
@@ -767,11 +856,8 @@ void module_init()
     spin_lock_init(&module_lock);
 
     kpm_safety_init();
-
-    /* Early boot counter (before /data mount) — protects embedded KPMs */
     kpm_safety_early_count();
 
-    /* Full boot counter check (after /data mount available) */
     if (kpm_safety_check_boot_count()) {
         extern int kp_safe_mode;
         kp_safe_mode = 1;
@@ -798,15 +884,11 @@ int module_dispatch_event(enum kpm_event event, const char *source_name, const c
     int count = 0;
     rcu_read_lock();
     struct module *pos;
-    list_for_each_entry(pos, &modules.list, list) {
+    list_for_each_entry_rcu(pos, &modules.list, list) {
         if (pos->event && *pos->event) {
             long rc = (*pos->event)(&data);
             logkfi("event %d -> module %s: rc=%ld\n", event, pos->info.name, rc);
             count++;
-        }
-        /* Backward compat: also call init with event string for old modules */
-        if (pos->init && *pos->init && event == KPM_EVENT_POST_FS_DATA) {
-            /* Old modules already got event via init(args, "load-file") */
         }
     }
     rcu_read_unlock();
