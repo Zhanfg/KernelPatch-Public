@@ -6,27 +6,43 @@
 #ifndef _KP_KPM_SAFETY_H_
 #define _KP_KPM_SAFETY_H_
 
-/* Boot counter: returns 1 if safe mode should be activated */
-int kpm_safety_check_boot_count(void);
-
-/* Early boot counter (before /data mount, for embedded KPMs) */
-void kpm_safety_early_count(void);
-
-/* Confirm boot succeeded — resets counter */
-void kpm_safety_confirm_boot(void);
-void kpm_safety_confirm_boot_completed(void);
+/* Begin exactly one transient attempt for the current boot. */
+void kpm_safety_begin_boot_attempt(void);
 
 /*
- * Basic ELF identity/header sanity only. Untrusted section, string, symbol,
- * relocation and size metadata are validated by module.c::validate_elf_structure()
- * before setup_load_info() is allowed to consume them.
+ * Persist/check the current attempt once /data is available.
+ * Returns 1 when safe mode is required, 0 for normal operation, or a negative
+ * errno when persistent state is unavailable/corrupt. Callers must treat a
+ * negative result as degraded/fail-closed.
  */
+int kpm_safety_persist_boot_attempt(void);
+
+/* Confirm the current persisted attempt after boot-completed. */
+int kpm_safety_confirm_boot_completed(void);
+
+/*
+ * Compatibility with the existing module_init() call sites.  These wrappers
+ * deliberately perform no persistent /data accounting: module_init may run
+ * before /data is mounted.  The persistent transition is owned exclusively by
+ * the post-fs-data event path.
+ */
+static inline void kpm_safety_early_count(void)
+{
+    kpm_safety_begin_boot_attempt();
+}
+
+static inline int kpm_safety_check_boot_count(void)
+{
+    return 0;
+}
+
+/* Pre-load ELF validation */
 int kpm_safety_validate(const void *data, int len);
 
 /* Blacklist check: returns 1 if KPM should be skipped */
 int kpm_safety_check_blacklist(const char *kpm_name);
 
-/* Mark a KPM as currently being loaded (for crash detection) */
+/* Mark a KPM as currently being loaded (for crash attribution) */
 void kpm_safety_mark_loading(const char *kpm_name);
 
 /* Explicit blacklist management */
