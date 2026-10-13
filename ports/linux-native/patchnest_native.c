@@ -14,6 +14,8 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/miscdevice.h>
+#include <linux/module.h>
+#include <linux/string.h>
 #include <linux/uaccess.h>
 #include "../../include/patchnest/runtime_abi.h"
 
