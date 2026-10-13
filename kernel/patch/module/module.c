@@ -526,7 +526,7 @@ static struct module *module_acquire(const char *name)
     if (!name) return NULL;
     spin_lock(&module_lock);
     mod = find_module(name); /* Must be called with module_lock held. */
-    if (mod) mod->callback_users++;
+    if (mod && !pn_kpm_lifetime_get(&mod->lifetime)) mod = NULL;
     spin_unlock(&module_lock);
     return mod;
 }
@@ -534,7 +534,7 @@ static struct module *module_acquire(const char *name)
 static void module_release(struct module *mod)
 {
     spin_lock(&module_lock);
-    if (mod->callback_users) mod->callback_users--;
+    if (!pn_kpm_lifetime_put(&mod->lifetime)) logkfe("KPM callback reference underflow\n");
     spin_unlock(&module_lock);
 }
 
@@ -651,7 +651,7 @@ long unload_module(const char *name, void *__user reserved)
     mod = find_module(name);
     if (!mod) {
         rc = -ENOENT;
-    } else if (mod->callback_users) {
+    } else if (!pn_kpm_lifetime_may_unload(&mod->lifetime)) {
         /* Do not free executable memory while control/event is running. */
         rc = -EBUSY;
     } else {
@@ -898,8 +898,8 @@ int module_dispatch_event(enum kpm_event event, const char *source_name,
     spin_lock(&module_lock);
     list_for_each_entry(pos, &modules.list, list) {
         if (size >= PATCHNEST_MAX_KPM_MODULES) break;
-        pos->callback_users++;
-        snapshot[size++] = pos;
+        if (pn_kpm_lifetime_get(&pos->lifetime))
+            snapshot[size++] = pos;
     }
     spin_unlock(&module_lock);
 
