@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+config PATCHNEST_CORE
+    bool "PatchNest built-in KPM runtime (development adapter)"
+    depends on ARM64 && MISC_DEVICES && KALLSYMS
+    default n
+    help
+      Exposes the read-only PatchNest ABI v1 status handshake at
+      /dev/patchnest. This development adapter does NOT yet load KPMs,
+      hook kernel functions, or implement embedded module management.
+      Keep disabled in production device configurations.
