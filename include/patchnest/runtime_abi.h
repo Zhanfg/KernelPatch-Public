@@ -67,6 +67,15 @@ struct patchnest_status_v1 {
     pn_u64 boot_session_id;
 };
 
+/*
+ * Kernel-native transport: STATUS is read/write so the caller supplies
+ * struct_size and abi_version for validation before any data is copied out.
+ * The patched backend is free to use the legacy supercall transport while
+ * preserving the same payload layout.
+ */
+#include <linux/ioctl.h>
+#define PATCHNEST_IOCTL_STATUS _IOWR('P', 0x01, struct patchnest_status_v1)
+
 enum patchnest_operation {
     PATCHNEST_OP_STATUS = 1,
     PATCHNEST_OP_LIST_KPM = 2,
