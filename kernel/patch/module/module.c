@@ -464,12 +464,48 @@ find_symtab:
 
 static int elf_header_check(struct load_info *info)
 {
-    if (info->len <= sizeof(*(info->hdr))) return -ENOEXEC;
-    if (memcmp(info->hdr->e_ident, ELFMAG, SELFMAG) || info->hdr->e_type != ET_REL || !elf_check_arch(info->hdr) ||
-        info->hdr->e_shentsize != sizeof(Elf_Shdr))
+    if (!info || !info->hdr || info->len < (int)sizeof(Elf_Ehdr)) return -ENOEXEC;
+
+    const Elf_Ehdr *hdr = info->hdr;
+    unsigned long len = (unsigned long)info->len;
+    if (memcmp(hdr->e_ident, ELFMAG, SELFMAG) ||
+        hdr->e_ident[EI_CLASS] != ELFCLASS64 ||
+        hdr->e_ident[EI_DATA] != ELFDATA2LSB ||
+        hdr->e_type != ET_REL || !elf_check_arch(hdr) ||
+        hdr->e_shentsize != sizeof(Elf_Shdr) || !hdr->e_shnum ||
+        hdr->e_shstrndx == SHN_UNDEF || hdr->e_shstrndx >= hdr->e_shnum)
         return -ENOEXEC;
-    if (info->hdr->e_shoff >= info->len || (info->hdr->e_shnum * sizeof(Elf_Shdr) > info->len - info->hdr->e_shoff))
+
+    /* Check bounds before setup_load_info dereferences the section table. */
+    if (hdr->e_shoff > len ||
+        hdr->e_shnum > (len - hdr->e_shoff) / sizeof(Elf_Shdr))
         return -ENOEXEC;
+
+    const Elf_Shdr *sections = (const void *)((const char *)hdr + hdr->e_shoff);
+    const Elf_Shdr *names = &sections[hdr->e_shstrndx];
+    if (names->sh_type != SHT_STRTAB || !names->sh_size ||
+        names->sh_offset > len || names->sh_size > len - names->sh_offset)
+        return -ENOEXEC;
+
+    const char *shstrtab = (const char *)hdr + names->sh_offset;
+    for (unsigned int i = 0; i < hdr->e_shnum; ++i) {
+        const Elf_Shdr *sec = &sections[i];
+        if (sec->sh_type != SHT_NOBITS &&
+            (sec->sh_offset > len || sec->sh_size > len - sec->sh_offset))
+            return -ENOEXEC;
+        if (sec->sh_name >= names->sh_size ||
+            !memchr(shstrtab + sec->sh_name, '\0', names->sh_size - sec->sh_name))
+            return -ENOEXEC;
+        if (sec->sh_type == SHT_SYMTAB &&
+            (sec->sh_link >= hdr->e_shnum ||
+             sections[sec->sh_link].sh_type != SHT_STRTAB ||
+             sec->sh_entsize != sizeof(Elf_Sym) ||
+             (sec->sh_size % sizeof(Elf_Sym)) != 0))
+            return -ENOEXEC;
+        if ((sec->sh_type == SHT_REL || sec->sh_type == SHT_RELA) &&
+            (sec->sh_info >= hdr->e_shnum || sec->sh_link >= hdr->e_shnum))
+            return -ENOEXEC;
+    }
     return 0;
 }
 
@@ -529,6 +565,12 @@ long load_module(const void *data, int len, const char *args, const char *event,
     /* Mark this KPM as loading (for crash detection) */
     kpm_safety_mark_loading(info->info.name);
 
+    /* init is mandatory; an exit callback is optional. Never jump to NULL. */
+    if (!mod->init || !*mod->init) {
+        rc = -ENOEXEC;
+        logkfe("KPM has no callable init entry point\n");
+        goto free;
+    }
     rc = (*mod->init)(mod->args, event, reserved);
 
     if (!rc) {
@@ -537,7 +579,8 @@ long load_module(const void *data, int len, const char *args, const char *event,
         goto out;
     } else {
         logkfi("[%s] failed with [%s] error: %d, try exit ...\n", mod->info.name, args, rc);
-        (*mod->exit)(reserved);
+        if (mod->exit && *mod->exit)
+            (*mod->exit)(reserved);
     }
 
 free:
@@ -718,15 +761,28 @@ int get_module_nums()
 
 int list_modules(char *out_names, int size)
 {
+    if (!out_names || size <= 0) return -EINVAL;
+    out_names[0] = '\0';
     rcu_read_lock();
 
     struct module *pos;
     int off = 0;
     list_for_each_entry(pos, &modules.list, list)
     {
-        off += snprintf(out_names + off, size - 1 - off, "%s\n", pos->info.name);
+        int remaining = size - off;
+        if (remaining <= 1) break;
+        int n = snprintf(out_names + off, remaining, "%s\n", pos->info.name);
+        if (n < 0) {
+            off = n;
+            break;
+        }
+        if (n >= remaining) {
+            off = size - 1;
+            break;
+        }
+        off += n;
     }
-    if (off > 0) out_names[off - 1] = '\0';
+    if (off > 0 && out_names[off - 1] == '\n') out_names[off - 1] = '\0';
 
     rcu_read_unlock();
     return off;
@@ -734,13 +790,16 @@ int list_modules(char *out_names, int size)
 
 int get_module_info(const char *name, char *out_info, int size)
 {
-    if (size <= 0) return 0;
+    if (!name || !out_info || size <= 0) return -EINVAL;
     rcu_read_lock();
 
     struct module *mod = find_module(name);
-    if (!mod) return -ENOENT;
+    if (!mod) {
+        rcu_read_unlock();
+        return -ENOENT;
+    }
 
-    int sz = snprintf(out_info, size - 1,
+    int sz = snprintf(out_info, size,
                       "name=%s\n"
                       "version=%s\n"
                       "license=%s\n"
@@ -754,7 +813,8 @@ int get_module_info(const char *name, char *out_info, int size)
                       mod->info.description ?: "",
                       mod->args ?: "");
 
-    if (sz > 0) out_info[sz - 1] = '\0';
+    if (sz >= size) sz = size - 1;
+    if (sz > 0 && out_info[sz - 1] == '\n') out_info[sz - 1] = '\0';
     logkfd("%s", out_info);
 
     rcu_read_unlock();
