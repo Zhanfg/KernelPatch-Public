@@ -93,8 +93,11 @@ PatchNest WebUI / CLI              <- 非常薄的控制面，无需常驻
 ## 5. 当前分支完成范围
 
 - 已建立双后端的 **ABI v1 数据结构/能力标识**；新增 `ports/linux-native/` 的 Kconfig/Kbuild 开发入口与 `/dev/patchnest` **只读状态握手**。该入口固定报告 `NOT_READY`、`capabilities=0`，不代表已支持 KPM 加载，也尚未接入目标内核编译。
-- 已修正现有 KPM loader 的几类独立风险：部分 ELF 边界、init/exit 空回调、模块枚举缓冲区、未知模块查询的 RCU 锁泄漏。
-- 后续必须补齐：KPM 高并发引用/卸载协议，native port，两个实际 adapter，用户态 API 调用、Kbuild/AK3 构建和真机验证。
+- 已实现 KPM 回调引用保护的第一阶段：列表自旋锁、单实例加载预留、控制回调独立参数、最多 64 个模块的事件快照，以及忙时 `-EBUSY` 卸载保护。共用引用计数基础逻辑使用 GCC/Clang + pthread 进行并发测试。
+- 已扩展 ELF 防御：大小、总内存映射预算、节对齐、符号表字符串终止、RELA 目标及索引/写入宽度边界。尚需变异样本 fuzz 与完整重定位语义审计。
+- 已添加 `tools/patchnest_status.c`（native `ioctl` 只读状态客户端），管理端 `Zhanfg/PatchNest` 的 Draft PR #12 提供只读运行时探测和展示。
+- **重要限制**：现有 callback pin 只覆盖 `control0/control1/event`，未覆盖 KPM 注册的所有外部 inline hook、异步工作任务与其他任意函数入口。因此动态卸载的代码存活期仍不能宣称彻底安全，Issue #10 仍是 P0 阻塞项。
+- 后续必须补齐：KPM hook/工作任务全链路注销与同步、Native KPM loader、Patched adapter、统一认证 API、真正的 Kbuild/AK3 编译和真机验证。
 - **禁止发布可刷入稳定包或自动合并 `main`，直到这些条件完成。**
 
 ## 6. 版本与仓库治理
