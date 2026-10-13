@@ -22,6 +22,7 @@
 #include <linux/vmalloc.h>
 #include <linux/rcupdate.h>
 #include <linux/rculist.h>
+/* The KPM list uses a short spinlock, not RCU callback lifetime. */
 
 #include "module.h"
 #include "relo.h"
@@ -512,6 +513,35 @@ static int elf_header_check(struct load_info *info)
 struct module modules = { 0 };
 static spinlock_t module_lock;
 
+/*
+ * KPM lifetime rules: module_lock protects list membership, callback_users
+ * and module_load_inflight. Module callbacks MUST run with the lock released.
+ * An unload during an active callback returns -EBUSY (never frees live code).
+ * This avoids blocking or sleeping in an RCU read-side critical section.
+ */
+#define PATCHNEST_MAX_KPM_MODULES 64
+static unsigned int module_count;
+static bool module_load_inflight;
+
+static struct module *module_acquire(const char *name)
+{
+    struct module *mod;
+
+    if (!name) return NULL;
+    spin_lock(&module_lock);
+    mod = find_module(name); /* Must be called with module_lock held. */
+    if (mod) mod->callback_users++;
+    spin_unlock(&module_lock);
+    return mod;
+}
+
+static void module_release(struct module *mod)
+{
+    spin_lock(&module_lock);
+    if (mod->callback_users) mod->callback_users--;
+    spin_unlock(&module_lock);
+}
+
 long load_module(const void *data, int len, const char *args, const char *event, void *__user reserved)
 {
     struct load_info load_info = { .len = len, .hdr = data };
@@ -534,14 +564,25 @@ long load_module(const void *data, int len, const char *args, const char *event,
         goto out;
     }
 
-    if (find_module(info->info.name)) {
-        logkfd("%s exist\n", info->info.name);
+    /* Reserve the single loader slot. Never hold a spinlock across init. */
+    spin_lock(&module_lock);
+    if (module_load_inflight) {
+        rc = -EBUSY;
+    } else if (find_module(info->info.name)) {
         rc = -EEXIST;
-        goto out;
+    } else if (module_count >= PATCHNEST_MAX_KPM_MODULES) {
+        rc = -ENOSPC;
+    } else {
+        module_load_inflight = true;
     }
+    spin_unlock(&module_lock);
+    if (rc) goto out;
 
     struct module *mod = (struct module *)vmalloc(sizeof(struct module));
-    if (!mod) return -ENOMEM;
+    if (!mod) {
+        rc = -ENOMEM;
+        goto clear_loader;
+    }
     memset(mod, 0, sizeof(struct module));
 
     if (args) {
@@ -575,8 +616,11 @@ long load_module(const void *data, int len, const char *args, const char *event,
 
     if (!rc) {
         logkfi("[%s] succeed with [%s] \n", mod->info.name, args);
+        spin_lock(&module_lock);
         list_add_tail(&mod->list, &modules.list);
-        goto out;
+        module_count++;
+        spin_unlock(&module_lock);
+        goto clear_loader;
     } else {
         logkfi("[%s] failed with [%s] error: %d, try exit ...\n", mod->info.name, args, rc);
         if (mod->exit && *mod->exit)
@@ -588,6 +632,10 @@ free:
     kp_free_exec(mod->start);
 free1:
     kvfree(mod);
+clear_loader:
+    spin_lock(&module_lock);
+    module_load_inflight = false;
+    spin_unlock(&module_lock);
 out:
     return rc;
 }
@@ -595,32 +643,32 @@ out:
 // todo: lock
 long unload_module(const char *name, void *__user reserved)
 {
-    if (!name) return -EINVAL;
-    logkfe("name: %s\n", name);
-
-    rcu_read_lock();
+    struct module *mod;
     long rc = 0;
 
-    struct module *mod = find_module(name);
+    if (!name) return -EINVAL;
+    spin_lock(&module_lock);
+    mod = find_module(name);
     if (!mod) {
         rc = -ENOENT;
-        goto out;
+    } else if (mod->callback_users) {
+        /* Do not free executable memory while control/event is running. */
+        rc = -EBUSY;
+    } else {
+        list_del(&mod->list);
+        module_count--;
     }
-    list_del(&mod->list);
-    if (mod->exit && *mod->exit) {
+    spin_unlock(&module_lock);
+    if (rc) return rc;
+
+    /* Detached: nobody can obtain new callback references. */
+    if (mod->exit && *mod->exit)
         rc = (*mod->exit)(reserved);
-    }
 
     if (mod->args) kvfree(mod->args);
     if (mod->ctl_args) kvfree(mod->ctl_args);
-
     kp_free_exec(mod->start);
     kvfree(mod);
-
-    logkfi("name: %s, rc: %d\n", name, rc);
-
-out:
-    rcu_read_unlock();
     return rc;
 }
 
