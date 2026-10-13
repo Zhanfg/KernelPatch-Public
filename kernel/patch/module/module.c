@@ -471,6 +471,13 @@ static int elf_header_check(struct load_info *info)
         hdr->e_shstrndx == SHN_UNDEF || hdr->e_shstrndx >= hdr->e_shnum)
         return -ENOEXEC;
 
+    /*
+     * Keep an upper bound on ELF metadata and all executable/data mappings.
+     * Even SHT_NOBITS consumes memory at relocation time.
+     */
+    if (len > (16u * 1024u * 1024u) || hdr->e_shnum > 1024)
+        return -EFBIG;
+
     /* Check bounds before setup_load_info dereferences the section table. */
     if (hdr->e_shoff > len ||
         hdr->e_shnum > (len - hdr->e_shoff) / sizeof(Elf_Shdr))
@@ -483,8 +490,23 @@ static int elf_header_check(struct load_info *info)
         return -ENOEXEC;
 
     const char *shstrtab = (const char *)hdr + names->sh_offset;
+    unsigned long long mapped_budget = 0;
     for (unsigned int i = 0; i < hdr->e_shnum; ++i) {
         const Elf_Shdr *sec = &sections[i];
+
+        /* Alignment is always power of two, not user-controlled padding. */
+        if (sec->sh_addralign &&
+            ((sec->sh_addralign & (sec->sh_addralign - 1)) != 0 ||
+             sec->sh_addralign > 65536))
+            return -ENOEXEC;
+        if (sec->sh_flags & SHF_ALLOC) {
+            /* Includes NOBITS, which has no ELF file payload. */
+            if (sec->sh_size > (32u * 1024u * 1024u))
+                return -EFBIG;
+            mapped_budget += sec->sh_size + (sec->sh_addralign ?: 1);
+            if (mapped_budget > (64u * 1024u * 1024u))
+                return -EFBIG;
+        }
         if (sec->sh_type != SHT_NOBITS &&
             (sec->sh_offset > len || sec->sh_size > len - sec->sh_offset))
             return -ENOEXEC;
@@ -497,9 +519,49 @@ static int elf_header_check(struct load_info *info)
              sec->sh_entsize != sizeof(Elf_Sym) ||
              (sec->sh_size % sizeof(Elf_Sym)) != 0))
             return -ENOEXEC;
-        if ((sec->sh_type == SHT_REL || sec->sh_type == SHT_RELA) &&
-            (sec->sh_info >= hdr->e_shnum || sec->sh_link >= hdr->e_shnum))
+        if (sec->sh_type == SHT_SYMTAB) {
+            const Elf_Shdr *strings = &sections[sec->sh_link];
+            const char *strtab = (const char *)hdr + strings->sh_offset;
+            const Elf_Sym *syms = (const void *)((const char *)hdr + sec->sh_offset);
+            unsigned long count = sec->sh_size / sizeof(*syms);
+
+            if (!strings->sh_size) return -ENOEXEC;
+            for (unsigned long j = 0; j < count; j++) {
+                const Elf_Sym *sym = &syms[j];
+                if (sym->st_name >= strings->sh_size ||
+                    !memchr(strtab + sym->st_name, '\0',
+                            strings->sh_size - sym->st_name))
+                    return -ENOEXEC;
+                if (sym->st_shndx >= hdr->e_shnum &&
+                    sym->st_shndx != SHN_UNDEF &&
+                    sym->st_shndx != SHN_ABS &&
+                    sym->st_shndx != SHN_COMMON)
+                    return -ENOEXEC;
+            }
+        }
+        /* AArch64 KPM uses RELA. REL is not implemented; fail closed. */
+        if (sec->sh_type == SHT_REL)
             return -ENOEXEC;
+        if (sec->sh_type == SHT_RELA) {
+            if (sec->sh_info >= hdr->e_shnum ||
+                sec->sh_link >= hdr->e_shnum ||
+                sections[sec->sh_link].sh_type != SHT_SYMTAB ||
+                sec->sh_entsize != sizeof(Elf64_Rela) ||
+                (sec->sh_size % sizeof(Elf64_Rela)) != 0)
+                return -ENOEXEC;
+            const Elf_Shdr *target = &sections[sec->sh_info];
+            const Elf_Shdr *symtab = &sections[sec->sh_link];
+            const Elf64_Rela *relas =
+                (const void *)((const char *)hdr + sec->sh_offset);
+            unsigned long nrelas = sec->sh_size / sizeof(*relas);
+            unsigned long nsym = symtab->sh_size / sizeof(Elf_Sym);
+            for (unsigned long j = 0; j < nrelas; j++) {
+                if (ELF64_R_SYM(relas[j].r_info) >= nsym ||
+                    target->sh_size < 4 ||
+                    relas[j].r_offset > target->sh_size - 4)
+                    return -ENOEXEC;
+            }
+        }
     }
     return 0;
 }
