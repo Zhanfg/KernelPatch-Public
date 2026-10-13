@@ -48,20 +48,7 @@ static inline bool strstarts(const char *str, const char *prefix)
     return strncmp(str, prefix, strlen(prefix)) == 0;
 }
 
-static char *next_string(char *string, unsigned long *secsize)
-{
-    while (string[0]) {
-        string++;
-        if ((*secsize)-- <= 1) return 0;
-    }
-    while (!string[0]) {
-        string++;
-        if ((*secsize)-- <= 1) return 0;
-    }
-    return string;
-}
-
-/* Update size with this section: return offset. */
+/* ELF section layout has already been checked by elf_header_check(). */
 static long get_offset(struct module *mod, unsigned int *size, Elf_Shdr *sechdr, unsigned int section)
 {
     long ret = ALIGN(*size, sechdr->sh_addralign ?: 1);
@@ -69,26 +56,33 @@ static long get_offset(struct module *mod, unsigned int *size, Elf_Shdr *sechdr,
     return ret;
 }
 
-static char *get_next_modinfo(const struct load_info *info, const char *tag, char *prev)
-{
-    char *p;
-    unsigned int taglen = strlen(tag);
-    Elf_Shdr *infosec = &info->sechdrs[info->index.info];
-    unsigned long size = infosec->sh_size;
-    char *modinfo = (char *)info->hdr + infosec->sh_offset;
-    if (prev) {
-        size -= prev - modinfo;
-        modinfo = next_string(prev, &size);
-    }
-    for (p = modinfo; p; p = next_string(p, &size)) {
-        if (strncmp(p, tag, taglen) == 0 && p[taglen] == '=') return p + taglen + 1;
-    }
-    return 0;
-}
-
+/* Never use strlen() on an untrusted ELF .modinfo/.kpm.info record. */
 static char *get_modinfo(const struct load_info *info, const char *tag)
 {
-    return get_next_modinfo(info, tag, 0);
+    const Elf_Shdr *sec;
+    const char *cursor, *end;
+    size_t left, tag_len;
+
+    if (!info || !tag || !info->index.info ||
+        info->index.info >= info->hdr->e_shnum)
+        return NULL;
+    sec = &info->sechdrs[info->index.info];
+    cursor = (const char *)info->hdr + sec->sh_offset;
+    left = sec->sh_size;
+    tag_len = strlen(tag);
+
+    while (left) {
+        size_t item_len;
+        end = memchr(cursor, '\0', left);
+        if (!end) return NULL; /* Unterminated metadata is malformed. */
+        item_len = (size_t)(end - cursor);
+        if (item_len > tag_len && cursor[tag_len] == '=' &&
+            !memcmp(cursor, tag, tag_len))
+            return (char *)cursor + tag_len + 1;
+        cursor = end + 1;
+        left -= item_len + 1;
+    }
+    return NULL;
 }
 
 static int find_sec(const struct load_info *info, const char *name)
@@ -114,7 +108,7 @@ static unsigned long get_sh_size(struct load_info *info, const char *secname)
     int idx = find_sec(info, secname);
     if (!idx) return 0;
     Elf_Shdr *infosec = &info->sechdrs[idx];
-    return infosec->sh_entsize;
+    return infosec->sh_size;
 }
 
 static void layout_sections(struct module *mod, struct load_info *info)
@@ -520,6 +514,8 @@ static spinlock_t module_lock;
  * This avoids blocking or sleeping in an RCU read-side critical section.
  */
 #define PATCHNEST_MAX_KPM_MODULES 64
+#define PATCHNEST_KPM_NAME_MAX 64
+#define PATCHNEST_KPM_FILE_MAX (16 * 1024 * 1024)
 static unsigned int module_count;
 static bool module_load_inflight;
 
@@ -549,18 +545,22 @@ long load_module(const void *data, int len, const char *args, const char *event,
     long rc = 0;
 
     if ((rc = elf_header_check(info))) goto out;
+    if ((rc = kpm_safety_validate(data, len))) goto out;
     if ((rc = setup_load_info(info))) goto out;
+    if (!info->info.name ||
+        strnlen(info->info.name, PATCHNEST_KPM_NAME_MAX) >= PATCHNEST_KPM_NAME_MAX) {
+        rc = -EINVAL;
+        goto out;
+    }
+    if (args && strnlen(args, 4097) > 4096) {
+        rc = -E2BIG;
+        goto out;
+    }
 
     /* Safety: check blacklist */
     if (kpm_safety_check_blacklist(info->info.name)) {
         logkfe("kpm_safety: skipping blacklisted module %s\n", info->info.name);
         rc = -EACCES;
-        goto out;
-    }
-
-    /* Safety: validate ELF structure */
-    if ((rc = kpm_safety_validate(data, len))) {
-        logkfe("kpm_safety: validation failed for %s\n", info->info.name);
         goto out;
     }
 
@@ -675,40 +675,47 @@ long unload_module(const char *name, void *__user reserved)
 long load_module_path(const char *path, const char *args, void *__user reserved)
 {
     long rc = 0;
-    logkfd("%s\n", path);
-    if (!path) return -EINVAL;
+    struct file *filp;
+    void *data;
+    loff_t len;
+    loff_t pos = 0;
 
-    struct file *filp = filp_open(path, O_RDONLY, 0);
+    if (!path) return -EINVAL;
+    logkfd("%s\n", path);
+    filp = filp_open(path, O_RDONLY, 0);
     if (unlikely(!filp || IS_ERR(filp))) {
         logkfe("open module: %s error\n", path);
         rc = PTR_ERR(filp);
         goto out;
     }
-    loff_t len = vfs_llseek(filp, 0, SEEK_END);
-    logkfd("module size: %llx\n", len);
-    vfs_llseek(filp, 0, SEEK_SET);
+    len = vfs_llseek(filp, 0, SEEK_END);
+    if (len < (loff_t)sizeof(Elf_Ehdr) || len > PATCHNEST_KPM_FILE_MAX) {
+        rc = len < 0 ? (long)len : -EFBIG;
+        goto close_file;
+    }
+    if (vfs_llseek(filp, 0, SEEK_SET) < 0) {
+        rc = -EIO;
+        goto close_file;
+    }
 
-    void *data = vmalloc(len);
+    data = vmalloc((size_t)len);
     if (!data) {
         rc = -ENOMEM;
-        goto out;
-    }
-    memset(data, 0, len);
-
-    loff_t pos = 0;
-    kernel_read(filp, data, len, &pos);
-    filp_close(filp, 0);
-
-    if (pos != len) {
-        logkfe("read module: %s error\n", path);
-        rc = -EIO;
-        goto free;
+        goto close_file;
     }
 
-    rc = load_module(data, len, args, "load-file", reserved);
-free:
+    rc = kernel_read(filp, data, (size_t)len, &pos);
+    if (rc != len) {
+        rc = rc < 0 ? rc : -EIO;
+        goto free_data;
+    }
+
+    /* Parsed and copied before closing the file; no stale file pointer. */
+    rc = load_module(data, (int)len, args, "load-file", reserved);
+free_data:
     kvfree(data);
-out:
+close_file:
+    filp_close(filp, 0);
     return rc;
 }
 
