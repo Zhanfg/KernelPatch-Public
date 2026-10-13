@@ -716,6 +716,7 @@ free_data:
     kvfree(data);
 close_file:
     filp_close(filp, 0);
+out:
     return rc;
 }
 
