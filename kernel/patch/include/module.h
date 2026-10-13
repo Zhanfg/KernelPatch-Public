@@ -8,6 +8,7 @@
 
 #include <asm-generic/module.h>
 #include <kpmodule.h>
+#include <kpm_lifetime.h>
 #include <uapi/kpm_event.h>
 
 struct load_info
@@ -55,7 +56,7 @@ struct module
      * with -EBUSY until all in-flight event/control callbacks finish.
      * This field is NOT an atomic/free-standing reference count.
      */
-    unsigned int callback_users;
+    struct pn_kpm_lifetime lifetime;
     struct list_head list;
 };
 
