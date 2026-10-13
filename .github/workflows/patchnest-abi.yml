@@ -12,6 +12,7 @@ on:
       - 'kernel/patch/include/kpm_lifetime.h'
       - 'kernel/patch/include/module.h'
       - 'kernel/patch/module/module.c'
+      - 'tools/patchnest_status.c'
       - '.github/workflows/patchnest-abi.yml'
   workflow_dispatch:
 
@@ -41,4 +42,16 @@ jobs:
               -fsanitize=undefined -fno-sanitize-recover=all \
               tests/kpm_lifetime_concurrency.c -o /tmp/patchnest-lifetime-"$cc"
             /tmp/patchnest-lifetime-"$cc"
+          done
+      - name: Compile status-only native client and verify missing-device behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          for cc in gcc clang; do
+            "$cc" -std=c11 -O2 -Wall -Wextra -Werror \
+              tools/patchnest_status.c -o /tmp/patchnest-status-"$cc"
+            rc=0
+            /tmp/patchnest-status-"$cc" >/tmp/pn-output 2>/tmp/pn-error || rc=$?
+            test "$rc" -eq 4
+            test ! -s /tmp/pn-output
           done
