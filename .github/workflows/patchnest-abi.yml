@@ -8,6 +8,10 @@ on:
     paths:
       - 'include/patchnest/**'
       - 'tests/patchnest_abi_smoke.c'
+      - 'tests/kpm_lifetime_concurrency.c'
+      - 'kernel/patch/include/kpm_lifetime.h'
+      - 'kernel/patch/include/module.h'
+      - 'kernel/patch/module/module.c'
       - '.github/workflows/patchnest-abi.yml'
   workflow_dispatch:
 
@@ -27,4 +31,14 @@ jobs:
             "$cc" -std=c11 -O2 -Wall -Wextra -Werror -pedantic \
               tests/patchnest_abi_smoke.c -o /tmp/patchnest-abi-"$cc"
             /tmp/patchnest-abi-"$cc"
+          done
+      - name: Exercise shared KPM lifetime primitive with concurrent callbacks
+        shell: bash
+        run: |
+          set -euo pipefail
+          for cc in gcc clang; do
+            "$cc" -std=c11 -O1 -g -pthread -Wall -Wextra -Werror \
+              -fsanitize=undefined -fno-sanitize-recover=all \
+              tests/kpm_lifetime_concurrency.c -o /tmp/patchnest-lifetime-"$cc"
+            /tmp/patchnest-lifetime-"$cc"
           done
