@@ -562,15 +562,15 @@ long load_module(const void *data, int len, const char *args, const char *event,
 
     flush_icache_all();
 
-    /* Mark this KPM as loading (for crash detection) */
-    kpm_safety_mark_loading(info->info.name);
-
-    /* init is mandatory; an exit callback is optional. Never jump to NULL. */
+    /* Validate before recording an in-progress load transaction. */
     if (!mod->init || !*mod->init) {
         rc = -ENOEXEC;
         logkfe("KPM has no callable init entry point\n");
         goto free;
     }
+
+    /* Mark this KPM as loading (for crash detection) */
+    kpm_safety_mark_loading(info->info.name);
     rc = (*mod->init)(mod->args, event, reserved);
 
     if (!rc) {
