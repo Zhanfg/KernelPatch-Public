@@ -712,70 +712,59 @@ out:
     return rc;
 }
 
-long module_control0(const char *name, const char *ctl_args, char *__user out_msg, int outlen)
+/*
+ * A callback gets a pin under module_lock; it may sleep once the lock
+ * is dropped. Dynamic unload fails with -EBUSY rather than freeing code
+ * underneath an in-flight callback. ctl0 arguments are call-scoped.
+ */
+long module_control0(const char *name, const char *ctl_args,
+                     char *__user out_msg, int outlen)
 {
-    if (!name || !ctl_args) return -EINVAL;
-    int args_len = strlen(ctl_args);
-    if (args_len <= 0) return -EINVAL;
+    struct module *mod;
+    char *local_args;
+    long rc;
+    size_t args_len;
 
-    logkfi("name %s, args: %s\n", name, ctl_args);
+    if (!name || !ctl_args || outlen < 0) return -EINVAL;
+    args_len = strlen(ctl_args);
+    if (!args_len || args_len > 4096) return -E2BIG;
 
-    long rc = 0;
-    rcu_read_lock();
-
-    struct module *mod = find_module(name);
-    if (!mod) {
-        rc = -ENOENT;
-        goto out;
-    }
+    mod = module_acquire(name);
+    if (!mod) return -ENOENT;
 
     if (!mod->ctl0 || !*mod->ctl0) {
-        logkfe("no ctl0\n");
         rc = -ENOSYS;
         goto out;
     }
 
-    if (mod->ctl_args) kvfree(mod->ctl_args);
-
-    mod->ctl_args = vmalloc(args_len + 1);
-    if (!mod->ctl_args) {
+    local_args = vmalloc(args_len + 1);
+    if (!local_args) {
         rc = -ENOMEM;
         goto out;
     }
+    memcpy(local_args, ctl_args, args_len + 1);
+    rc = (*mod->ctl0)(local_args, out_msg, outlen);
+    kvfree(local_args);
 
-    strcpy(mod->ctl_args, ctl_args);
-
-    rc = (*mod->ctl0)(mod->ctl_args, out_msg, outlen);
-
-    logkfi("name: %s, rc: %d\n", name, rc);
 out:
-    rcu_read_unlock();
+    module_release(mod);
     return rc;
 }
 
 long module_control1(const char *name, void *a1, void *a2, void *a3)
 {
-    logkfi("name %s, a1: %llx, a2: %llx, a3: %llx\n", name, a1, a2, a3);
-    long rc = 0;
-    rcu_read_lock();
+    struct module *mod;
+    long rc;
 
-    struct module *mod = find_module(name);
-    if (!mod) {
-        rc = -ENOENT;
-        goto out;
-    }
-
+    if (!name) return -EINVAL;
+    mod = module_acquire(name);
+    if (!mod) return -ENOENT;
     if (!mod->ctl1 || !*mod->ctl1) {
-        logkfe("no ctl1\n");
         rc = -ENOSYS;
-        goto out;
+    } else {
+        rc = (*mod->ctl1)(a1, a2, a3);
     }
-
-    rc = (*mod->ctl1)(a1, a2, a3);
-
-    logkfi("name: %s, rc: %d\n", name, rc);
-out:
-    rcu_read_unlock();
+    module_release(mod);
     return rc;
 }
 
@@ -793,33 +782,26 @@ struct module *find_module(const char *name)
 
 int get_module_nums()
 {
-    rcu_read_lock();
-
-    struct module *pos;
-    int n = 0;
-    list_for_each_entry(pos, &modules.list, list)
-    {
-        n++;
-    }
-    rcu_read_unlock();
-
-    logkfd("%d\n", n);
+    int n;
+    spin_lock(&module_lock);
+    n = (int)module_count;
+    spin_unlock(&module_lock);
     return n;
 }
 
 int list_modules(char *out_names, int size)
 {
-    if (!out_names || size <= 0) return -EINVAL;
-    out_names[0] = '\0';
-    rcu_read_lock();
-
     struct module *pos;
     int off = 0;
-    list_for_each_entry(pos, &modules.list, list)
-    {
+
+    if (!out_names || size <= 0) return -EINVAL;
+    out_names[0] = '\0';
+    spin_lock(&module_lock);
+    list_for_each_entry(pos, &modules.list, list) {
         int remaining = size - off;
+        int n;
         if (remaining <= 1) break;
-        int n = snprintf(out_names + off, remaining, "%s\n", pos->info.name);
+        n = snprintf(out_names + off, remaining, "%s\n", pos->info.name);
         if (n < 0) {
             off = n;
             break;
@@ -831,41 +813,33 @@ int list_modules(char *out_names, int size)
         off += n;
     }
     if (off > 0 && out_names[off - 1] == '\n') out_names[off - 1] = '\0';
-
-    rcu_read_unlock();
+    spin_unlock(&module_lock);
     return off;
 }
 
 int get_module_info(const char *name, char *out_info, int size)
 {
-    if (!name || !out_info || size <= 0) return -EINVAL;
-    rcu_read_lock();
+    struct module *mod;
+    int sz;
 
-    struct module *mod = find_module(name);
+    if (!name || !out_info || size <= 0) return -EINVAL;
+    spin_lock(&module_lock);
+    mod = find_module(name);
     if (!mod) {
-        rcu_read_unlock();
+        spin_unlock(&module_lock);
         return -ENOENT;
     }
-
-    int sz = snprintf(out_info, size,
-                      "name=%s\n"
-                      "version=%s\n"
-                      "license=%s\n"
-                      "author=%s\n"
-                      "description=%s\n"
-                      "args=%s\n",
-                      mod->info.name ?: "unknown",
-                      mod->info.version ?: "0.0.0",
-                      mod->info.license ?: "unknown",
-                      mod->info.author ?: "unknown",
-                      mod->info.description ?: "",
-                      mod->args ?: "");
-
+    sz = snprintf(out_info, size,
+                  "name=%s\nversion=%s\nlicense=%s\nauthor=%s\ndescription=%s\nargs=%s\n",
+                  mod->info.name ?: "unknown",
+                  mod->info.version ?: "0.0.0",
+                  mod->info.license ?: "unknown",
+                  mod->info.author ?: "unknown",
+                  mod->info.description ?: "",
+                  mod->args ?: "");
     if (sz >= size) sz = size - 1;
     if (sz > 0 && out_info[sz - 1] == '\n') out_info[sz - 1] = '\0';
-    logkfd("%s", out_info);
-
-    rcu_read_unlock();
+    spin_unlock(&module_lock);
     return sz;
 }
 
@@ -892,33 +866,45 @@ void module_init()
     proc_hide_init();
 }
 
-int module_dispatch_event(enum kpm_event event, const char *source_name, const char *args)
+int module_dispatch_event(enum kpm_event event, const char *source_name,
+                          const char *args)
 {
-    if (event <= KPM_EVENT_NONE || event >= KPM_EVENT_MAX) return -EINVAL;
-
+    struct module *snapshot[PATCHNEST_MAX_KPM_MODULES];
     struct kpm_event_data data = {
         .event = event,
         .source_name = source_name,
         .args = args,
         .reserved = NULL,
     };
-
-    int count = 0;
-    rcu_read_lock();
     struct module *pos;
+    unsigned int size = 0;
+    int dispatched = 0;
+
+    if (event <= KPM_EVENT_NONE || event >= KPM_EVENT_MAX)
+        return -EINVAL;
+
+    /*
+     * Take a bounded snapshot under module_lock. Pin each callback before
+     * releasing the lock; unload sees -EBUSY until all pins are dropped.
+     * Callbacks may sleep; never run them under RCU or a spinlock.
+     */
+    spin_lock(&module_lock);
     list_for_each_entry(pos, &modules.list, list) {
+        if (size >= PATCHNEST_MAX_KPM_MODULES) break;
+        pos->callback_users++;
+        snapshot[size++] = pos;
+    }
+    spin_unlock(&module_lock);
+
+    for (unsigned int i = 0; i < size; i++) {
+        pos = snapshot[i];
         if (pos->event && *pos->event) {
             long rc = (*pos->event)(&data);
-            logkfi("event %d -> module %s: rc=%ld\n", event, pos->info.name, rc);
-            count++;
+            logkfi("event %d -> module %s: rc=%ld\n",
+                   event, pos->info.name, rc);
+            dispatched++;
         }
-        /* Backward compat: also call init with event string for old modules */
-        if (pos->init && *pos->init && event == KPM_EVENT_POST_FS_DATA) {
-            /* Old modules already got event via init(args, "load-file") */
-        }
+        module_release(pos);
     }
-    rcu_read_unlock();
-
-    logkfi("dispatched event %d to %d modules\n", event, count);
-    return count;
+    return dispatched;
 }
