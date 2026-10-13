@@ -50,6 +50,12 @@ struct module
 
     void *start;
 
+    /*
+     * Protected by module_lock in patch/module/module.c. Unload refuses
+     * with -EBUSY until all in-flight event/control callbacks finish.
+     * This field is NOT an atomic/free-standing reference count.
+     */
+    unsigned int callback_users;
     struct list_head list;
 };
 
