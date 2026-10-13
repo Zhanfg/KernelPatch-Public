@@ -521,6 +521,10 @@ static int elf_header_check(struct load_info *info)
             return -ENOEXEC;
         if (sec->sh_type == SHT_SYMTAB) {
             const Elf_Shdr *strings = &sections[sec->sh_link];
+            /* The linked string table may appear later in the section list. */
+            if (strings->sh_offset > len ||
+                strings->sh_size > len - strings->sh_offset)
+                return -ENOEXEC;
             const char *strtab = (const char *)hdr + strings->sh_offset;
             const Elf_Sym *syms = (const void *)((const char *)hdr + sec->sh_offset);
             unsigned long count = sec->sh_size / sizeof(*syms);
