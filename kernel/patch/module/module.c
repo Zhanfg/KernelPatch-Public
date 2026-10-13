@@ -4,6 +4,7 @@
  */
 
 #include <uapi/asm-generic/errno.h>
+#include <asm/elf.h>
 #include <pgtable.h>
 #include <kpmalloc.h>
 #include <linux/err.h>
@@ -560,9 +561,18 @@ static int elf_header_check(struct load_info *info)
             unsigned long nrelas = sec->sh_size / sizeof(*relas);
             unsigned long nsym = symtab->sh_size / sizeof(Elf_Sym);
             for (unsigned long j = 0; j < nrelas; j++) {
+                unsigned int type = ELF64_R_TYPE(relas[j].r_info);
+                unsigned int access_width = 4; /* AArch64 instructions */
+                if (type == R_AARCH64_NONE)
+                    access_width = 0;
+                else if (type == R_AARCH64_ABS64 || type == R_AARCH64_PREL64)
+                    access_width = 8;
+                else if (type == R_AARCH64_ABS16 || type == R_AARCH64_PREL16)
+                    access_width = 2;
+
                 if (ELF64_R_SYM(relas[j].r_info) >= nsym ||
-                    target->sh_size < 4 ||
-                    relas[j].r_offset > target->sh_size - 4)
+                    target->sh_size < access_width ||
+                    relas[j].r_offset > target->sh_size - access_width)
                     return -ENOEXEC;
             }
         }
