@@ -6,6 +6,7 @@
  * For patched kernels, an eventual patched-backend adapter will provide
  * the same ABI data; do not infer runtime capabilities from kpatch hello.
  */
+#define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
