@@ -1,0 +1,30 @@
+name: PatchNest dual-backend ABI smoke
+
+on:
+  push:
+    branches:
+      - 'refactor/dual-backend-runtime'
+  pull_request:
+    paths:
+      - 'include/patchnest/**'
+      - 'tests/patchnest_abi_smoke.c'
+      - '.github/workflows/patchnest-abi.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  abi-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Compile and test ABI contract with GCC and Clang
+        shell: bash
+        run: |
+          set -euo pipefail
+          for cc in gcc clang; do
+            "$cc" -std=c11 -O2 -Wall -Wextra -Werror -pedantic \
+              tests/patchnest_abi_smoke.c -o /tmp/patchnest-abi-"$cc"
+            /tmp/patchnest-abi-"$cc"
+          done
