@@ -92,7 +92,7 @@ PatchNest WebUI / CLI              <- 非常薄的控制面，无需常驻
 
 ## 5. 当前分支完成范围
 
-- 已建立双后端的 **ABI v1 数据结构/能力标识**，不等于已经挂接到内核控制通道。
+- 已建立双后端的 **ABI v1 数据结构/能力标识**；新增 `ports/linux-native/` 的 Kconfig/Kbuild 开发入口与 `/dev/patchnest` **只读状态握手**。该入口固定报告 `NOT_READY`、`capabilities=0`，不代表已支持 KPM 加载，也尚未接入目标内核编译。
 - 已修正现有 KPM loader 的几类独立风险：部分 ELF 边界、init/exit 空回调、模块枚举缓冲区、未知模块查询的 RCU 锁泄漏。
 - 后续必须补齐：KPM 高并发引用/卸载协议，native port，两个实际 adapter，用户态 API 调用、Kbuild/AK3 构建和真机验证。
 - **禁止发布可刷入稳定包或自动合并 `main`，直到这些条件完成。**
