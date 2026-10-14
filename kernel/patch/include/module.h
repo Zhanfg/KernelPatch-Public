@@ -8,6 +8,7 @@
 
 #include <asm-generic/module.h>
 #include <kpmodule.h>
+#include <kpm_lifetime.h>
 #include <uapi/kpm_event.h>
 
 struct load_info
@@ -50,6 +51,12 @@ struct module
 
     void *start;
 
+    /*
+     * Protected by module_lock in patch/module/module.c. Unload refuses
+     * with -EBUSY until all in-flight event/control callbacks finish.
+     * This field is NOT an atomic/free-standing reference count.
+     */
+    struct pn_kpm_lifetime lifetime;
     struct list_head list;
 };
 

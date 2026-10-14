@@ -4,6 +4,7 @@
  */
 
 #include <uapi/asm-generic/errno.h>
+#include <asm/elf.h>
 #include <pgtable.h>
 #include <kpmalloc.h>
 #include <linux/err.h>
@@ -22,6 +23,7 @@
 #include <linux/vmalloc.h>
 #include <linux/rcupdate.h>
 #include <linux/rculist.h>
+/* The KPM list uses a short spinlock, not RCU callback lifetime. */
 
 #include "module.h"
 #include "relo.h"
@@ -47,20 +49,7 @@ static inline bool strstarts(const char *str, const char *prefix)
     return strncmp(str, prefix, strlen(prefix)) == 0;
 }
 
-static char *next_string(char *string, unsigned long *secsize)
-{
-    while (string[0]) {
-        string++;
-        if ((*secsize)-- <= 1) return 0;
-    }
-    while (!string[0]) {
-        string++;
-        if ((*secsize)-- <= 1) return 0;
-    }
-    return string;
-}
-
-/* Update size with this section: return offset. */
+/* ELF section layout has already been checked by elf_header_check(). */
 static long get_offset(struct module *mod, unsigned int *size, Elf_Shdr *sechdr, unsigned int section)
 {
     long ret = ALIGN(*size, sechdr->sh_addralign ?: 1);
@@ -68,26 +57,33 @@ static long get_offset(struct module *mod, unsigned int *size, Elf_Shdr *sechdr,
     return ret;
 }
 
-static char *get_next_modinfo(const struct load_info *info, const char *tag, char *prev)
-{
-    char *p;
-    unsigned int taglen = strlen(tag);
-    Elf_Shdr *infosec = &info->sechdrs[info->index.info];
-    unsigned long size = infosec->sh_size;
-    char *modinfo = (char *)info->hdr + infosec->sh_offset;
-    if (prev) {
-        size -= prev - modinfo;
-        modinfo = next_string(prev, &size);
-    }
-    for (p = modinfo; p; p = next_string(p, &size)) {
-        if (strncmp(p, tag, taglen) == 0 && p[taglen] == '=') return p + taglen + 1;
-    }
-    return 0;
-}
-
+/* Never use strlen() on an untrusted ELF .modinfo/.kpm.info record. */
 static char *get_modinfo(const struct load_info *info, const char *tag)
 {
-    return get_next_modinfo(info, tag, 0);
+    const Elf_Shdr *sec;
+    const char *cursor, *end;
+    size_t left, tag_len;
+
+    if (!info || !tag || !info->index.info ||
+        info->index.info >= info->hdr->e_shnum)
+        return NULL;
+    sec = &info->sechdrs[info->index.info];
+    cursor = (const char *)info->hdr + sec->sh_offset;
+    left = sec->sh_size;
+    tag_len = strlen(tag);
+
+    while (left) {
+        size_t item_len;
+        end = memchr(cursor, '\0', left);
+        if (!end) return NULL; /* Unterminated metadata is malformed. */
+        item_len = (size_t)(end - cursor);
+        if (item_len > tag_len && cursor[tag_len] == '=' &&
+            !memcmp(cursor, tag, tag_len))
+            return (char *)cursor + tag_len + 1;
+        cursor = end + 1;
+        left -= item_len + 1;
+    }
+    return NULL;
 }
 
 static int find_sec(const struct load_info *info, const char *name)
@@ -113,7 +109,7 @@ static unsigned long get_sh_size(struct load_info *info, const char *secname)
     int idx = find_sec(info, secname);
     if (!idx) return 0;
     Elf_Shdr *infosec = &info->sechdrs[idx];
-    return infosec->sh_entsize;
+    return infosec->sh_size;
 }
 
 static void layout_sections(struct module *mod, struct load_info *info)
@@ -464,17 +460,159 @@ find_symtab:
 
 static int elf_header_check(struct load_info *info)
 {
-    if (info->len <= sizeof(*(info->hdr))) return -ENOEXEC;
-    if (memcmp(info->hdr->e_ident, ELFMAG, SELFMAG) || info->hdr->e_type != ET_REL || !elf_check_arch(info->hdr) ||
-        info->hdr->e_shentsize != sizeof(Elf_Shdr))
+    if (!info || !info->hdr || info->len < (int)sizeof(Elf_Ehdr)) return -ENOEXEC;
+
+    const Elf_Ehdr *hdr = info->hdr;
+    unsigned long len = (unsigned long)info->len;
+    if (memcmp(hdr->e_ident, ELFMAG, SELFMAG) ||
+        hdr->e_ident[EI_CLASS] != ELFCLASS64 ||
+        hdr->e_ident[EI_DATA] != ELFDATA2LSB ||
+        hdr->e_type != ET_REL || !elf_check_arch(hdr) ||
+        hdr->e_shentsize != sizeof(Elf_Shdr) || !hdr->e_shnum ||
+        hdr->e_shstrndx == SHN_UNDEF || hdr->e_shstrndx >= hdr->e_shnum)
         return -ENOEXEC;
-    if (info->hdr->e_shoff >= info->len || (info->hdr->e_shnum * sizeof(Elf_Shdr) > info->len - info->hdr->e_shoff))
+
+    /*
+     * Keep an upper bound on ELF metadata and all executable/data mappings.
+     * Even SHT_NOBITS consumes memory at relocation time.
+     */
+    if (len > (16u * 1024u * 1024u) || hdr->e_shnum > 1024)
+        return -EFBIG;
+
+    /* Check bounds before setup_load_info dereferences the section table. */
+    if (hdr->e_shoff > len ||
+        hdr->e_shnum > (len - hdr->e_shoff) / sizeof(Elf_Shdr))
         return -ENOEXEC;
+
+    const Elf_Shdr *sections = (const void *)((const char *)hdr + hdr->e_shoff);
+    const Elf_Shdr *names = &sections[hdr->e_shstrndx];
+    if (names->sh_type != SHT_STRTAB || !names->sh_size ||
+        names->sh_offset > len || names->sh_size > len - names->sh_offset)
+        return -ENOEXEC;
+
+    const char *shstrtab = (const char *)hdr + names->sh_offset;
+    unsigned long long mapped_budget = 0;
+    for (unsigned int i = 0; i < hdr->e_shnum; ++i) {
+        const Elf_Shdr *sec = &sections[i];
+
+        /* Alignment is always power of two, not user-controlled padding. */
+        if (sec->sh_addralign &&
+            ((sec->sh_addralign & (sec->sh_addralign - 1)) != 0 ||
+             sec->sh_addralign > 65536))
+            return -ENOEXEC;
+        if (sec->sh_flags & SHF_ALLOC) {
+            /* Includes NOBITS, which has no ELF file payload. */
+            if (sec->sh_size > (32u * 1024u * 1024u))
+                return -EFBIG;
+            mapped_budget += sec->sh_size + (sec->sh_addralign ?: 1);
+            if (mapped_budget > (64u * 1024u * 1024u))
+                return -EFBIG;
+        }
+        if (sec->sh_type != SHT_NOBITS &&
+            (sec->sh_offset > len || sec->sh_size > len - sec->sh_offset))
+            return -ENOEXEC;
+        if (sec->sh_name >= names->sh_size ||
+            !memchr(shstrtab + sec->sh_name, '\0', names->sh_size - sec->sh_name))
+            return -ENOEXEC;
+        if (sec->sh_type == SHT_SYMTAB &&
+            (sec->sh_link >= hdr->e_shnum ||
+             sections[sec->sh_link].sh_type != SHT_STRTAB ||
+             sec->sh_entsize != sizeof(Elf_Sym) ||
+             (sec->sh_size % sizeof(Elf_Sym)) != 0))
+            return -ENOEXEC;
+        if (sec->sh_type == SHT_SYMTAB) {
+            const Elf_Shdr *strings = &sections[sec->sh_link];
+            /* The linked string table may appear later in the section list. */
+            if (strings->sh_offset > len ||
+                strings->sh_size > len - strings->sh_offset)
+                return -ENOEXEC;
+            const char *strtab = (const char *)hdr + strings->sh_offset;
+            const Elf_Sym *syms = (const void *)((const char *)hdr + sec->sh_offset);
+            unsigned long count = sec->sh_size / sizeof(*syms);
+
+            if (!strings->sh_size) return -ENOEXEC;
+            for (unsigned long j = 0; j < count; j++) {
+                const Elf_Sym *sym = &syms[j];
+                if (sym->st_name >= strings->sh_size ||
+                    !memchr(strtab + sym->st_name, '\0',
+                            strings->sh_size - sym->st_name))
+                    return -ENOEXEC;
+                if (sym->st_shndx >= hdr->e_shnum &&
+                    sym->st_shndx != SHN_UNDEF &&
+                    sym->st_shndx != SHN_ABS &&
+                    sym->st_shndx != SHN_COMMON)
+                    return -ENOEXEC;
+            }
+        }
+        /* AArch64 KPM uses RELA. REL is not implemented; fail closed. */
+        if (sec->sh_type == SHT_REL)
+            return -ENOEXEC;
+        if (sec->sh_type == SHT_RELA) {
+            if (sec->sh_info >= hdr->e_shnum ||
+                sec->sh_link >= hdr->e_shnum ||
+                sections[sec->sh_link].sh_type != SHT_SYMTAB ||
+                sec->sh_entsize != sizeof(Elf64_Rela) ||
+                (sec->sh_size % sizeof(Elf64_Rela)) != 0)
+                return -ENOEXEC;
+            const Elf_Shdr *target = &sections[sec->sh_info];
+            const Elf_Shdr *symtab = &sections[sec->sh_link];
+            const Elf64_Rela *relas =
+                (const void *)((const char *)hdr + sec->sh_offset);
+            unsigned long nrelas = sec->sh_size / sizeof(*relas);
+            unsigned long nsym = symtab->sh_size / sizeof(Elf_Sym);
+            for (unsigned long j = 0; j < nrelas; j++) {
+                unsigned int type = ELF64_R_TYPE(relas[j].r_info);
+                unsigned int access_width = 4; /* AArch64 instructions */
+                if (type == R_AARCH64_NONE)
+                    access_width = 0;
+                else if (type == R_AARCH64_ABS64 || type == R_AARCH64_PREL64)
+                    access_width = 8;
+                else if (type == R_AARCH64_ABS16 || type == R_AARCH64_PREL16)
+                    access_width = 2;
+
+                if (ELF64_R_SYM(relas[j].r_info) >= nsym ||
+                    target->sh_size < access_width ||
+                    relas[j].r_offset > target->sh_size - access_width)
+                    return -ENOEXEC;
+            }
+        }
+    }
     return 0;
 }
 
 struct module modules = { 0 };
 static spinlock_t module_lock;
+
+/*
+ * KPM lifetime rules: module_lock protects list membership, callback_users
+ * and module_load_inflight. Module callbacks MUST run with the lock released.
+ * An unload during an active callback returns -EBUSY (never frees live code).
+ * This avoids blocking or sleeping in an RCU read-side critical section.
+ */
+#define PATCHNEST_MAX_KPM_MODULES 64
+#define PATCHNEST_KPM_NAME_MAX 64
+#define PATCHNEST_KPM_FILE_MAX (16 * 1024 * 1024)
+static unsigned int module_count;
+static bool module_load_inflight;
+
+static struct module *module_acquire(const char *name)
+{
+    struct module *mod;
+
+    if (!name) return NULL;
+    spin_lock(&module_lock);
+    mod = find_module(name); /* Must be called with module_lock held. */
+    if (mod && !pn_kpm_lifetime_get(&mod->lifetime)) mod = NULL;
+    spin_unlock(&module_lock);
+    return mod;
+}
+
+static void module_release(struct module *mod)
+{
+    spin_lock(&module_lock);
+    if (!pn_kpm_lifetime_put(&mod->lifetime)) logkfe("KPM callback reference underflow\n");
+    spin_unlock(&module_lock);
+}
 
 long load_module(const void *data, int len, const char *args, const char *event, void *__user reserved)
 {
@@ -483,7 +621,17 @@ long load_module(const void *data, int len, const char *args, const char *event,
     long rc = 0;
 
     if ((rc = elf_header_check(info))) goto out;
+    if ((rc = kpm_safety_validate(data, len))) goto out;
     if ((rc = setup_load_info(info))) goto out;
+    if (!info->info.name ||
+        strnlen(info->info.name, PATCHNEST_KPM_NAME_MAX) >= PATCHNEST_KPM_NAME_MAX) {
+        rc = -EINVAL;
+        goto out;
+    }
+    if (args && strnlen(args, 4097) > 4096) {
+        rc = -E2BIG;
+        goto out;
+    }
 
     /* Safety: check blacklist */
     if (kpm_safety_check_blacklist(info->info.name)) {
@@ -492,20 +640,25 @@ long load_module(const void *data, int len, const char *args, const char *event,
         goto out;
     }
 
-    /* Safety: validate ELF structure */
-    if ((rc = kpm_safety_validate(data, len))) {
-        logkfe("kpm_safety: validation failed for %s\n", info->info.name);
-        goto out;
-    }
-
-    if (find_module(info->info.name)) {
-        logkfd("%s exist\n", info->info.name);
+    /* Reserve the single loader slot. Never hold a spinlock across init. */
+    spin_lock(&module_lock);
+    if (module_load_inflight) {
+        rc = -EBUSY;
+    } else if (find_module(info->info.name)) {
         rc = -EEXIST;
-        goto out;
+    } else if (module_count >= PATCHNEST_MAX_KPM_MODULES) {
+        rc = -ENOSPC;
+    } else {
+        module_load_inflight = true;
     }
+    spin_unlock(&module_lock);
+    if (rc) goto out;
 
     struct module *mod = (struct module *)vmalloc(sizeof(struct module));
-    if (!mod) return -ENOMEM;
+    if (!mod) {
+        rc = -ENOMEM;
+        goto clear_loader;
+    }
     memset(mod, 0, sizeof(struct module));
 
     if (args) {
@@ -526,18 +679,28 @@ long load_module(const void *data, int len, const char *args, const char *event,
 
     flush_icache_all();
 
+    /* Validate before recording an in-progress load transaction. */
+    if (!mod->init || !*mod->init) {
+        rc = -ENOEXEC;
+        logkfe("KPM has no callable init entry point\n");
+        goto free;
+    }
+
     /* Mark this KPM as loading (for crash detection) */
     kpm_safety_mark_loading(info->info.name);
-
     rc = (*mod->init)(mod->args, event, reserved);
 
     if (!rc) {
         logkfi("[%s] succeed with [%s] \n", mod->info.name, args);
+        spin_lock(&module_lock);
         list_add_tail(&mod->list, &modules.list);
-        goto out;
+        module_count++;
+        spin_unlock(&module_lock);
+        goto clear_loader;
     } else {
         logkfi("[%s] failed with [%s] error: %d, try exit ...\n", mod->info.name, args, rc);
-        (*mod->exit)(reserved);
+        if (mod->exit && *mod->exit)
+            (*mod->exit)(reserved);
     }
 
 free:
@@ -545,6 +708,10 @@ free:
     kp_free_exec(mod->start);
 free1:
     kvfree(mod);
+clear_loader:
+    spin_lock(&module_lock);
+    module_load_inflight = false;
+    spin_unlock(&module_lock);
 out:
     return rc;
 }
@@ -552,139 +719,136 @@ out:
 // todo: lock
 long unload_module(const char *name, void *__user reserved)
 {
-    if (!name) return -EINVAL;
-    logkfe("name: %s\n", name);
-
-    rcu_read_lock();
+    struct module *mod;
     long rc = 0;
 
-    struct module *mod = find_module(name);
+    if (!name) return -EINVAL;
+    spin_lock(&module_lock);
+    mod = find_module(name);
     if (!mod) {
         rc = -ENOENT;
-        goto out;
+    } else if (!pn_kpm_lifetime_may_unload(&mod->lifetime)) {
+        /* Do not free executable memory while control/event is running. */
+        rc = -EBUSY;
+    } else {
+        list_del(&mod->list);
+        module_count--;
     }
-    list_del(&mod->list);
-    if (mod->exit && *mod->exit) {
+    spin_unlock(&module_lock);
+    if (rc) return rc;
+
+    /* Detached: nobody can obtain new callback references. */
+    if (mod->exit && *mod->exit)
         rc = (*mod->exit)(reserved);
-    }
 
     if (mod->args) kvfree(mod->args);
     if (mod->ctl_args) kvfree(mod->ctl_args);
-
     kp_free_exec(mod->start);
     kvfree(mod);
-
-    logkfi("name: %s, rc: %d\n", name, rc);
-
-out:
-    rcu_read_unlock();
     return rc;
 }
 
 long load_module_path(const char *path, const char *args, void *__user reserved)
 {
     long rc = 0;
-    logkfd("%s\n", path);
-    if (!path) return -EINVAL;
+    struct file *filp;
+    void *data;
+    loff_t len;
+    loff_t pos = 0;
 
-    struct file *filp = filp_open(path, O_RDONLY, 0);
+    if (!path) return -EINVAL;
+    logkfd("%s\n", path);
+    filp = filp_open(path, O_RDONLY, 0);
     if (unlikely(!filp || IS_ERR(filp))) {
         logkfe("open module: %s error\n", path);
         rc = PTR_ERR(filp);
         goto out;
     }
-    loff_t len = vfs_llseek(filp, 0, SEEK_END);
-    logkfd("module size: %llx\n", len);
-    vfs_llseek(filp, 0, SEEK_SET);
+    len = vfs_llseek(filp, 0, SEEK_END);
+    if (len < (loff_t)sizeof(Elf_Ehdr) || len > PATCHNEST_KPM_FILE_MAX) {
+        rc = len < 0 ? (long)len : -EFBIG;
+        goto close_file;
+    }
+    if (vfs_llseek(filp, 0, SEEK_SET) < 0) {
+        rc = -EIO;
+        goto close_file;
+    }
 
-    void *data = vmalloc(len);
+    data = vmalloc((size_t)len);
     if (!data) {
         rc = -ENOMEM;
-        goto out;
-    }
-    memset(data, 0, len);
-
-    loff_t pos = 0;
-    kernel_read(filp, data, len, &pos);
-    filp_close(filp, 0);
-
-    if (pos != len) {
-        logkfe("read module: %s error\n", path);
-        rc = -EIO;
-        goto free;
+        goto close_file;
     }
 
-    rc = load_module(data, len, args, "load-file", reserved);
-free:
+    rc = kernel_read(filp, data, (size_t)len, &pos);
+    if (rc != len) {
+        rc = rc < 0 ? rc : -EIO;
+        goto free_data;
+    }
+
+    /* Parsed and copied before closing the file; no stale file pointer. */
+    rc = load_module(data, (int)len, args, "load-file", reserved);
+free_data:
     kvfree(data);
+close_file:
+    filp_close(filp, 0);
 out:
     return rc;
 }
 
-long module_control0(const char *name, const char *ctl_args, char *__user out_msg, int outlen)
+/*
+ * A callback gets a pin under module_lock; it may sleep once the lock
+ * is dropped. Dynamic unload fails with -EBUSY rather than freeing code
+ * underneath an in-flight callback. ctl0 arguments are call-scoped.
+ */
+long module_control0(const char *name, const char *ctl_args,
+                     char *__user out_msg, int outlen)
 {
-    if (!name || !ctl_args) return -EINVAL;
-    int args_len = strlen(ctl_args);
-    if (args_len <= 0) return -EINVAL;
+    struct module *mod;
+    char *local_args;
+    long rc;
+    size_t args_len;
 
-    logkfi("name %s, args: %s\n", name, ctl_args);
+    if (!name || !ctl_args || outlen < 0) return -EINVAL;
+    args_len = strlen(ctl_args);
+    if (!args_len || args_len > 4096) return -E2BIG;
 
-    long rc = 0;
-    rcu_read_lock();
-
-    struct module *mod = find_module(name);
-    if (!mod) {
-        rc = -ENOENT;
-        goto out;
-    }
+    mod = module_acquire(name);
+    if (!mod) return -ENOENT;
 
     if (!mod->ctl0 || !*mod->ctl0) {
-        logkfe("no ctl0\n");
         rc = -ENOSYS;
         goto out;
     }
 
-    if (mod->ctl_args) kvfree(mod->ctl_args);
-
-    mod->ctl_args = vmalloc(args_len + 1);
-    if (!mod->ctl_args) {
+    local_args = vmalloc(args_len + 1);
+    if (!local_args) {
         rc = -ENOMEM;
         goto out;
     }
+    memcpy(local_args, ctl_args, args_len + 1);
+    rc = (*mod->ctl0)(local_args, out_msg, outlen);
+    kvfree(local_args);
 
-    strcpy(mod->ctl_args, ctl_args);
-
-    rc = (*mod->ctl0)(mod->ctl_args, out_msg, outlen);
-
-    logkfi("name: %s, rc: %d\n", name, rc);
 out:
-    rcu_read_unlock();
+    module_release(mod);
     return rc;
 }
 
 long module_control1(const char *name, void *a1, void *a2, void *a3)
 {
-    logkfi("name %s, a1: %llx, a2: %llx, a3: %llx\n", name, a1, a2, a3);
-    long rc = 0;
-    rcu_read_lock();
+    struct module *mod;
+    long rc;
 
-    struct module *mod = find_module(name);
-    if (!mod) {
-        rc = -ENOENT;
-        goto out;
-    }
-
+    if (!name) return -EINVAL;
+    mod = module_acquire(name);
+    if (!mod) return -ENOENT;
     if (!mod->ctl1 || !*mod->ctl1) {
-        logkfe("no ctl1\n");
         rc = -ENOSYS;
-        goto out;
+    } else {
+        rc = (*mod->ctl1)(a1, a2, a3);
     }
-
-    rc = (*mod->ctl1)(a1, a2, a3);
-
-    logkfi("name: %s, rc: %d\n", name, rc);
-out:
-    rcu_read_unlock();
+    module_release(mod);
     return rc;
 }
 
@@ -702,62 +866,64 @@ struct module *find_module(const char *name)
 
 int get_module_nums()
 {
-    rcu_read_lock();
-
-    struct module *pos;
-    int n = 0;
-    list_for_each_entry(pos, &modules.list, list)
-    {
-        n++;
-    }
-    rcu_read_unlock();
-
-    logkfd("%d\n", n);
+    int n;
+    spin_lock(&module_lock);
+    n = (int)module_count;
+    spin_unlock(&module_lock);
     return n;
 }
 
 int list_modules(char *out_names, int size)
 {
-    rcu_read_lock();
-
     struct module *pos;
     int off = 0;
-    list_for_each_entry(pos, &modules.list, list)
-    {
-        off += snprintf(out_names + off, size - 1 - off, "%s\n", pos->info.name);
-    }
-    if (off > 0) out_names[off - 1] = '\0';
 
-    rcu_read_unlock();
+    if (!out_names || size <= 0) return -EINVAL;
+    out_names[0] = '\0';
+    spin_lock(&module_lock);
+    list_for_each_entry(pos, &modules.list, list) {
+        int remaining = size - off;
+        int n;
+        if (remaining <= 1) break;
+        n = snprintf(out_names + off, remaining, "%s\n", pos->info.name);
+        if (n < 0) {
+            off = n;
+            break;
+        }
+        if (n >= remaining) {
+            off = size - 1;
+            break;
+        }
+        off += n;
+    }
+    if (off > 0 && out_names[off - 1] == '\n') out_names[off - 1] = '\0';
+    spin_unlock(&module_lock);
     return off;
 }
 
 int get_module_info(const char *name, char *out_info, int size)
 {
-    if (size <= 0) return 0;
-    rcu_read_lock();
+    struct module *mod;
+    int sz;
 
-    struct module *mod = find_module(name);
-    if (!mod) return -ENOENT;
-
-    int sz = snprintf(out_info, size - 1,
-                      "name=%s\n"
-                      "version=%s\n"
-                      "license=%s\n"
-                      "author=%s\n"
-                      "description=%s\n"
-                      "args=%s\n",
-                      mod->info.name ?: "unknown",
-                      mod->info.version ?: "0.0.0",
-                      mod->info.license ?: "unknown",
-                      mod->info.author ?: "unknown",
-                      mod->info.description ?: "",
-                      mod->args ?: "");
-
-    if (sz > 0) out_info[sz - 1] = '\0';
-    logkfd("%s", out_info);
-
-    rcu_read_unlock();
+    if (!name || !out_info || size <= 0) return -EINVAL;
+    spin_lock(&module_lock);
+    mod = find_module(name);
+    if (!mod) {
+        spin_unlock(&module_lock);
+        return -ENOENT;
+    }
+    sz = snprintf(out_info, size,
+                  "name=%s\nversion=%s\nlicense=%s\nauthor=%s\ndescription=%s\nargs=%s\n",
+                  mod->info.name ?: "unknown",
+                  mod->info.version ?: "0.0.0",
+                  mod->info.license ?: "unknown",
+                  mod->info.author ?: "unknown",
+                  mod->info.description ?: "",
+                  mod->args ?: "");
+    if (sz >= size) sz = size - 1;
+    if (sz > 0 && out_info[sz - 1] == '\n') out_info[sz - 1] = '\0';
+    spin_unlock(&module_lock);
     return sz;
 }
 
@@ -784,33 +950,45 @@ void module_init()
     proc_hide_init();
 }
 
-int module_dispatch_event(enum kpm_event event, const char *source_name, const char *args)
+int module_dispatch_event(enum kpm_event event, const char *source_name,
+                          const char *args)
 {
-    if (event <= KPM_EVENT_NONE || event >= KPM_EVENT_MAX) return -EINVAL;
-
+    struct module *snapshot[PATCHNEST_MAX_KPM_MODULES];
     struct kpm_event_data data = {
         .event = event,
         .source_name = source_name,
         .args = args,
         .reserved = NULL,
     };
-
-    int count = 0;
-    rcu_read_lock();
     struct module *pos;
+    unsigned int size = 0;
+    int dispatched = 0;
+
+    if (event <= KPM_EVENT_NONE || event >= KPM_EVENT_MAX)
+        return -EINVAL;
+
+    /*
+     * Take a bounded snapshot under module_lock. Pin each callback before
+     * releasing the lock; unload sees -EBUSY until all pins are dropped.
+     * Callbacks may sleep; never run them under RCU or a spinlock.
+     */
+    spin_lock(&module_lock);
     list_for_each_entry(pos, &modules.list, list) {
+        if (size >= PATCHNEST_MAX_KPM_MODULES) break;
+        if (pn_kpm_lifetime_get(&pos->lifetime))
+            snapshot[size++] = pos;
+    }
+    spin_unlock(&module_lock);
+
+    for (unsigned int i = 0; i < size; i++) {
+        pos = snapshot[i];
         if (pos->event && *pos->event) {
             long rc = (*pos->event)(&data);
-            logkfi("event %d -> module %s: rc=%ld\n", event, pos->info.name, rc);
-            count++;
+            logkfi("event %d -> module %s: rc=%ld\n",
+                   event, pos->info.name, rc);
+            dispatched++;
         }
-        /* Backward compat: also call init with event string for old modules */
-        if (pos->init && *pos->init && event == KPM_EVENT_POST_FS_DATA) {
-            /* Old modules already got event via init(args, "load-file") */
-        }
+        module_release(pos);
     }
-    rcu_read_unlock();
-
-    logkfi("dispatched event %d to %d modules\n", event, count);
-    return count;
+    return dispatched;
 }

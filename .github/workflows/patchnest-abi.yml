@@ -1,0 +1,66 @@
+name: PatchNest dual-backend ABI smoke
+
+on:
+  push:
+    branches:
+      - 'refactor/dual-backend-runtime'
+  pull_request:
+    paths:
+      - 'include/patchnest/**'
+      - 'tests/patchnest_abi_smoke.c'
+      - 'tests/kpm_lifetime_concurrency.c'
+      - 'kernel/patch/include/kpm_lifetime.h'
+      - 'kernel/patch/include/module.h'
+      - 'kernel/patch/module/module.c'
+      - 'tools/patchnest_status.c'
+      - 'ports/linux-native/**'
+      - 'tests/patchnest_native_integration.sh'
+      - '.github/workflows/patchnest-abi.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  abi-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Compile and test ABI contract with GCC and Clang
+        shell: bash
+        run: |
+          set -euo pipefail
+          for cc in gcc clang; do
+            "$cc" -std=c11 -O2 -Wall -Wextra -Werror -pedantic \
+              tests/patchnest_abi_smoke.c -o /tmp/patchnest-abi-"$cc"
+            /tmp/patchnest-abi-"$cc"
+          done
+      - name: Exercise shared KPM lifetime primitive with concurrent callbacks
+        shell: bash
+        run: |
+          set -euo pipefail
+          for cc in gcc clang; do
+            "$cc" -std=c11 -O1 -g -pthread -Wall -Wextra -Werror \
+              -fsanitize=undefined -fno-sanitize-recover=all \
+              tests/kpm_lifetime_concurrency.c -o /tmp/patchnest-lifetime-"$cc"
+            /tmp/patchnest-lifetime-"$cc"
+          done
+      - name: Verify non-destructive in-tree Kbuild integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          dash -n ports/linux-native/integrate.sh
+          dash tests/patchnest_native_integration.sh
+          bash tests/patchnest_native_integration.sh
+      - name: Compile status-only native client and verify missing-device behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          for cc in gcc clang; do
+            "$cc" -std=c11 -O2 -Wall -Wextra -Werror \
+              tools/patchnest_status.c -o /tmp/patchnest-status-"$cc"
+            rc=0
+            /tmp/patchnest-status-"$cc" >/tmp/pn-output 2>/tmp/pn-error || rc=$?
+            test "$rc" -eq 4
+            test ! -s /tmp/pn-output
+          done
