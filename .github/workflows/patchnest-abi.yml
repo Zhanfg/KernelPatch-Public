@@ -13,6 +13,8 @@ on:
       - 'kernel/patch/include/module.h'
       - 'kernel/patch/module/module.c'
       - 'tools/patchnest_status.c'
+      - 'ports/linux-native/**'
+      - 'tests/patchnest_native_integration.sh'
       - '.github/workflows/patchnest-abi.yml'
   workflow_dispatch:
 
@@ -43,6 +45,13 @@ jobs:
               tests/kpm_lifetime_concurrency.c -o /tmp/patchnest-lifetime-"$cc"
             /tmp/patchnest-lifetime-"$cc"
           done
+      - name: Verify non-destructive in-tree Kbuild integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          dash -n ports/linux-native/integrate.sh
+          dash tests/patchnest_native_integration.sh
+          bash tests/patchnest_native_integration.sh
       - name: Compile status-only native client and verify missing-device behavior
         shell: bash
         run: |
