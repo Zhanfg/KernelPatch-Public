@@ -38,9 +38,24 @@ if [ "${PATCHNEST_APPLY:-0}" != "1" ]; then
     exit 0
 fi
 
-# Never silently replace another implementation that shares these names.
+# Preflight ALL destination files before creating anything.
+# Reject symlinked adapter trees and conflicting prior implementations.
 dst="$KERNEL/drivers/patchnest"
-mkdir -p "$dst"
+abi_dst="$KERNEL/include/linux/patchnest_runtime_abi.h"
+if [ -L "$dst" ] || [ -L "$abi_dst" ]; then
+    echo "ERROR: symlinked destination is not trusted" >&2
+    exit 1
+fi
+if [ -e "$abi_dst" ] && ! cmp -s "$PROJECT_DIR/include/patchnest/runtime_abi.h" "$abi_dst"; then
+    echo "ERROR: ABI header differs, refusing overwrite" >&2
+    exit 1
+fi
+for file in Kconfig Makefile; do
+    if [ -e "$dst/$file" ] && ! cmp -s "$SELF_DIR/$file" "$dst/$file"; then
+        echo "ERROR: existing $file differs, refusing overwrite" >&2
+        exit 1
+    fi
+done
 if [ -f "$dst/patchnest_native.c" ] &&
    ! cmp -s "$SELF_DIR/patchnest_native.c" "$dst/patchnest_native.c"; then
     # The installed file has an adjusted include, compare a normalized copy.
@@ -55,6 +70,7 @@ if [ -f "$dst/patchnest_native.c" ] &&
     rm -f "$tmp"
 fi
 
+mkdir -p "$dst"
 cp "$SELF_DIR/Kconfig" "$dst/Kconfig"
 cp "$SELF_DIR/Makefile" "$dst/Makefile"
 tmp=$(mktemp) || exit 1
