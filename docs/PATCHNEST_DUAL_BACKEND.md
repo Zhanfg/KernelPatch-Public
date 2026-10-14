@@ -100,6 +100,14 @@ PatchNest WebUI / CLI              <- 非常薄的控制面，无需常驻
 - 后续必须补齐：KPM hook/工作任务全链路注销与同步、Native KPM loader、Patched adapter、统一认证 API、真正的 Kbuild/AK3 编译和真机验证。
 - **禁止发布可刷入稳定包或自动合并 `main`，直到这些条件完成。**
 
+### A 版 Linux 内核源码接入（本轮新增）
+
+`ports/linux-native/integrate.sh` 可以将 status-only native adapter 安装到一个完整 Linux ARM64 内核源码树。脚本默认 **dry run**，且在任何复制发生前执行既有实现冲突检查；需显式设置 `PATCHNEST_KERNEL_SOURCE` 与 `PATCHNEST_APPLY=1` 才会修改目标源码。可重复运行，不会重复附加 Kconfig / Makefile 条目。脚本在交互终端也支持直接 `sh` 无参数执行。
+
+集成后，`CONFIG_PATCHNEST_CORE` 默认为 `n`。可显式改为 `y` 做目标内核编译验证；当前代码仍只提供 `/dev/patchnest` 状态握手，**绝不应该宣称可加载或嵌入 KPM**。内核源码树的构建、OnePlus 6/13 对应 AK3 打包、实机稳定性尚未完成。
+
+CI 的 `tests/patchnest_native_integration.sh` 覆盖 dry-run 无副作用、重复接入幂等性、原始文件保持不变以及 ABI 和 driver 冲突拒绝。其通过不等于真正 Kbuild/GKI 链接完成。
+
 ## 6. 版本与仓库治理
 
 - Core 改动仅在本仓库 feature 分支；WebUI/CLI 改动将进入 `Zhanfg/PatchNest` 的对应 feature 分支。
