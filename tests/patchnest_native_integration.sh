@@ -17,8 +17,15 @@ PATCHNEST_APPLY=1 sh "$root/ports/linux-native/integrate.sh"
 [ "$(grep -Fc 'source "drivers/patchnest/Kconfig"' "$tmp/linux/drivers/Kconfig")" = 1 ]
 [ "$(grep -Fc 'obj-$(CONFIG_PATCHNEST_CORE) += patchnest/' "$tmp/linux/drivers/Makefile")" = 1 ]
 grep -Fq '#include <linux/patchnest_runtime_abi.h>' "$tmp/linux/drivers/patchnest/patchnest_native.c"
-cmp "$tmp/linux/drivers/original.txt" /dev/null >/dev/null && exit 1 || :
 grep -Fq 'original' "$tmp/linux/drivers/original.txt"
+# Conflicting ABI must be rejected without damaging the kernel tree.
+printf 'unknown ABI\n' > "$tmp/linux/include/linux/patchnest_runtime_abi.h"
+if PATCHNEST_APPLY=1 sh "$root/ports/linux-native/integrate.sh" >/dev/null 2>&1; then
+    echo "ERROR: conflicting ABI header overwritten" >&2
+    exit 1
+fi
+grep -Fq 'unknown ABI' "$tmp/linux/include/linux/patchnest_runtime_abi.h"
+cp "$root/include/patchnest/runtime_abi.h" "$tmp/linux/include/linux/patchnest_runtime_abi.h"
 # Conflicting preexisting driver must never be overwritten.
 printf 'different implementation\n' > "$tmp/linux/drivers/patchnest/patchnest_native.c"
 if PATCHNEST_APPLY=1 sh "$root/ports/linux-native/integrate.sh" >/dev/null 2>&1; then
