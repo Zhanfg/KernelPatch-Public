@@ -21,6 +21,59 @@ enum aarch64_reloc_op
     RELOC_OP_PAGE,
 };
 
+/* Bytes written at the relocation target. -1 rejects an unsupported type before any store. */
+static int reloc_write_width(unsigned int type)
+{
+    switch (type) {
+    case R_ARM_NONE:
+    case R_AARCH64_NONE:
+        return 0;
+    case R_AARCH64_ABS16:
+    case R_AARCH64_PREL16:
+        return 2;
+    case R_AARCH64_ABS32:
+    case R_AARCH64_PREL32:
+        return 4;
+    case R_AARCH64_ABS64:
+    case R_AARCH64_PREL64:
+        return 8;
+    case R_AARCH64_MOVW_UABS_G0_NC:
+    case R_AARCH64_MOVW_UABS_G0:
+    case R_AARCH64_MOVW_UABS_G1_NC:
+    case R_AARCH64_MOVW_UABS_G1:
+    case R_AARCH64_MOVW_UABS_G2_NC:
+    case R_AARCH64_MOVW_UABS_G2:
+    case R_AARCH64_MOVW_UABS_G3:
+    case R_AARCH64_MOVW_SABS_G0:
+    case R_AARCH64_MOVW_SABS_G1:
+    case R_AARCH64_MOVW_SABS_G2:
+    case R_AARCH64_MOVW_PREL_G0_NC:
+    case R_AARCH64_MOVW_PREL_G0:
+    case R_AARCH64_MOVW_PREL_G1_NC:
+    case R_AARCH64_MOVW_PREL_G1:
+    case R_AARCH64_MOVW_PREL_G2_NC:
+    case R_AARCH64_MOVW_PREL_G2:
+    case R_AARCH64_MOVW_PREL_G3:
+    case R_AARCH64_LD_PREL_LO19:
+    case R_AARCH64_ADR_PREL_LO21:
+    case R_AARCH64_ADR_PREL_PG_HI21_NC:
+    case R_AARCH64_ADR_PREL_PG_HI21:
+    case R_AARCH64_ADD_ABS_LO12_NC:
+    case R_AARCH64_LDST8_ABS_LO12_NC:
+    case R_AARCH64_LDST16_ABS_LO12_NC:
+    case R_AARCH64_LDST32_ABS_LO12_NC:
+    case R_AARCH64_LDST64_ABS_LO12_NC:
+    case R_AARCH64_LDST128_ABS_LO12_NC:
+    case R_AARCH64_TSTBR14:
+    case R_AARCH64_CONDBR19:
+    case R_AARCH64_JUMP26:
+    case R_AARCH64_CALL26:
+        return 4;
+    default:
+        return -1;
+    }
+}
+
 static u64 do_reloc(enum aarch64_reloc_op reloc_op, void *place, u64 val)
 {
     switch (reloc_op) {
@@ -177,10 +230,24 @@ int apply_relocate_add(Elf64_Shdr *sechdrs, const char *strtab, unsigned int sym
     Elf64_Rela *rel = (void *)sechdrs[relsec].sh_addr;
 
     for (i = 0; i < sechdrs[relsec].sh_size / sizeof(*rel); i++) {
+        unsigned int r_sym = ELF64_R_SYM(rel[i].r_info);
+        unsigned int r_type = ELF64_R_TYPE(rel[i].r_info);
+        int width = reloc_write_width(r_type);
+        Elf64_Xword sym_count = sechdrs[symindex].sh_size / sizeof(Elf64_Sym);
+        Elf64_Shdr *target = &sechdrs[sechdrs[relsec].sh_info];
+
+        if (width < 0) {
+            pr_err("unsupported RELA relocation: %u\n", r_type);
+            return -ENOEXEC;
+        }
+        if (r_sym >= sym_count) return -ENOEXEC;
+        if (width > 0 && (rel[i].r_offset > target->sh_size || (Elf64_Xword)width > target->sh_size - rel[i].r_offset))
+            return -ENOEXEC;
+
         /* loc corresponds to P in the AArch64 ELF document. */
-        loc = (void *)sechdrs[sechdrs[relsec].sh_info].sh_addr + rel[i].r_offset;
+        loc = (void *)target->sh_addr + rel[i].r_offset;
         /* sym is the ELF symbol we're referring to. */
-        sym = (Elf64_Sym *)sechdrs[symindex].sh_addr + ELF64_R_SYM(rel[i].r_info);
+        sym = (Elf64_Sym *)sechdrs[symindex].sh_addr + r_sym;
         /* val corresponds to (S + A) in the AArch64 ELF document. */
         val = sym->st_value + rel[i].r_addend;
 

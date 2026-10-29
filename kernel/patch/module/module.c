@@ -49,17 +49,24 @@ static inline bool strstarts(const char *str, const char *prefix)
     return strncmp(str, prefix, strlen(prefix)) == 0;
 }
 
-static char *next_string(char *string, unsigned long *secsize)
+/* True when [off, off+size) lies entirely inside the file. Avoids offset+size wrap. */
+static int elf_bytes_fit(unsigned long file_len, unsigned long off, unsigned long size)
 {
-    while (string[0]) {
-        string++;
-        if ((*secsize)-- <= 1) return 0;
+    if (off > file_len) return 0;
+    if (size > file_len - off) return 0;
+    return 1;
+}
+
+/* sh_name / st_name must land on a NUL inside the string table. */
+static int elf_name_terminated(const char *strings, unsigned long size, unsigned long off)
+{
+    unsigned long i;
+
+    if (off >= size) return 0;
+    for (i = off; i < size; i++) {
+        if (strings[i] == '\0') return 1;
     }
-    while (!string[0]) {
-        string++;
-        if ((*secsize)-- <= 1) return 0;
-    }
-    return string;
+    return 0;
 }
 
 /* Update size with this section: return offset. */
@@ -72,17 +79,44 @@ static long get_offset(struct module *mod, unsigned int *size, Elf_Shdr *sechdr,
 
 static char *get_next_modinfo(const struct load_info *info, const char *tag, char *prev)
 {
-    char *p;
-    unsigned int taglen = strlen(tag);
-    Elf_Shdr *infosec = &info->sechdrs[info->index.info];
-    unsigned long size = infosec->sh_size;
-    char *modinfo = (char *)info->hdr + infosec->sh_offset;
+    Elf_Shdr *infosec;
+    char *base, *end, *p;
+    unsigned int taglen;
+
+    if (!info->index.info || info->index.info >= info->hdr->e_shnum) return 0;
+    infosec = &info->sechdrs[info->index.info];
+    if (infosec->sh_type == SHT_NOBITS) return 0;
+    if (!elf_bytes_fit(info->len, infosec->sh_offset, infosec->sh_size)) return 0;
+
+    base = (char *)info->hdr + infosec->sh_offset;
+    end = base + infosec->sh_size;
+    taglen = strlen(tag);
+    p = base;
     if (prev) {
-        size -= prev - modinfo;
-        modinfo = next_string(prev, &size);
+        if (prev < base || prev >= end) return 0;
+        p = prev;
+        while (p < end && *p) p++;
+        while (p < end && !*p) p++;
     }
-    for (p = modinfo; p; p = next_string(p, &size)) {
-        if (strncmp(p, tag, taglen) == 0 && p[taglen] == '=') return p + taglen + 1;
+
+    while (p < end) {
+        unsigned long left = (unsigned long)(end - p);
+        unsigned int i;
+        int match = left >= (unsigned long)taglen + 1;
+
+        for (i = 0; match && i < taglen; i++) {
+            if (p[i] != tag[i]) match = 0;
+        }
+        if (match && p[taglen] == '=') {
+            char *val = p + taglen + 1;
+            char *scan = val;
+
+            while (scan < end && *scan) scan++;
+            if (scan == end) return 0;
+            return val;
+        }
+        while (p < end && *p) p++;
+        while (p < end && !*p) p++;
     }
     return 0;
 }
@@ -199,6 +233,10 @@ static int simplify_symbols(struct module *mod, const struct load_info *info)
             sym[i].st_value = addr;
             break;
         default:
+            if (sym[i].st_shndx >= info->hdr->e_shnum) {
+                ret = -ENOEXEC;
+                break;
+            }
             secbase = info->sechdrs[sym[i].st_shndx].sh_addr;
             sym[i].st_value += secbase;
             break;
@@ -213,7 +251,8 @@ static int apply_relocations(struct module *mod, const struct load_info *info)
     unsigned int i;
     for (i = 1; i < info->hdr->e_shnum; i++) {
         unsigned int infosec = info->sechdrs[i].sh_info;
-        if (infosec >= info->hdr->e_shnum) continue;
+        if (info->sechdrs[i].sh_type != SHT_REL && info->sechdrs[i].sh_type != SHT_RELA) continue;
+        if (infosec >= info->hdr->e_shnum || info->sechdrs[i].sh_link >= info->hdr->e_shnum) return -ENOEXEC;
         if (!(info->sechdrs[infosec].sh_flags & SHF_ALLOC)) continue;
         if (info->sechdrs[i].sh_type == SHT_REL) {
             rc = apply_relocate(info->sechdrs, info->strtab, info->index.sym, i, mod);
@@ -265,7 +304,7 @@ static int rewrite_section_headers(struct load_info *info)
     info->sechdrs[0].sh_addr = 0;
     for (int i = 1; i < info->hdr->e_shnum; i++) {
         Elf_Shdr *shdr = &info->sechdrs[i];
-        if (shdr->sh_type != SHT_NOBITS && info->len < shdr->sh_offset + shdr->sh_size) {
+        if (shdr->sh_type != SHT_NOBITS && !elf_bytes_fit(info->len, shdr->sh_offset, shdr->sh_size)) {
             return -ENOEXEC;
         }
         /* Mark all sections sh_addr with their address in the temporary image. */
@@ -464,15 +503,86 @@ find_symtab:
     return 0;
 }
 
+static int elf_validate_metadata(const Elf_Ehdr *ehdr, unsigned long len)
+{
+    const Elf_Shdr *shdrs;
+    const char *shstr;
+    unsigned long shoff, shnum, shstrndx, shstrsz, i, alloc_budget;
+
+    shnum = ehdr->e_shnum;
+    if (shnum == 0) return -ENOEXEC;
+    shoff = ehdr->e_shoff;
+    if (shoff > len || (shnum * sizeof(Elf_Shdr)) > len - shoff) return -ENOEXEC;
+
+    shdrs = (const Elf_Shdr *)((const char *)ehdr + shoff);
+    shstrndx = ehdr->e_shstrndx;
+    if (shstrndx == SHN_UNDEF || shstrndx >= shnum) return -ENOEXEC;
+    if (shdrs[shstrndx].sh_type == SHT_NOBITS) return -ENOEXEC;
+    if (!elf_bytes_fit(len, shdrs[shstrndx].sh_offset, shdrs[shstrndx].sh_size)) return -ENOEXEC;
+    shstr = (const char *)ehdr + shdrs[shstrndx].sh_offset;
+    shstrsz = shdrs[shstrndx].sh_size;
+
+    alloc_budget = 0;
+    for (i = 0; i < shnum; i++) {
+        const Elf_Shdr *sh = &shdrs[i];
+        unsigned long align;
+        unsigned long entry;
+
+        if (sh->sh_type != SHT_NOBITS && !elf_bytes_fit(len, sh->sh_offset, sh->sh_size)) return -ENOEXEC;
+        if (!elf_name_terminated(shstr, shstrsz, sh->sh_name)) return -ENOEXEC;
+
+        if (sh->sh_type == SHT_SYMTAB || sh->sh_type == SHT_DYNSYM || sh->sh_type == SHT_REL || sh->sh_type == SHT_RELA) {
+            if (sh->sh_link >= shnum) return -ENOEXEC;
+        }
+        if (sh->sh_type == SHT_REL || sh->sh_type == SHT_RELA) {
+            if (sh->sh_info >= shnum) return -ENOEXEC;
+            entry = sh->sh_type == SHT_REL ? sizeof(Elf64_Rel) : sizeof(Elf64_Rela);
+            if (sh->sh_entsize && sh->sh_entsize != entry) return -ENOEXEC;
+            if (sh->sh_size % entry) return -ENOEXEC;
+        }
+
+        if (!(sh->sh_flags & SHF_ALLOC)) continue;
+        align = sh->sh_addralign ? sh->sh_addralign : 1;
+        if (align > SZ_128M || (align & (align - 1))) return -ENOEXEC;
+        if (sh->sh_size > SZ_128M || align - 1 > SZ_128M - alloc_budget) return -ENOEXEC;
+        alloc_budget += align - 1;
+        if (sh->sh_size > SZ_128M - alloc_budget) return -ENOEXEC;
+        alloc_budget += sh->sh_size;
+    }
+
+    for (i = 0; i < shnum; i++) {
+        const Elf_Shdr *sh = &shdrs[i];
+        const Elf_Shdr *strsec;
+        const char *strtab;
+        const Elf_Sym *sym;
+        unsigned long count, s;
+
+        if (sh->sh_type != SHT_SYMTAB && sh->sh_type != SHT_DYNSYM) continue;
+        if (sh->sh_entsize && sh->sh_entsize != sizeof(Elf_Sym)) return -ENOEXEC;
+        if (sh->sh_type == SHT_NOBITS || sh->sh_size % sizeof(Elf_Sym)) return -ENOEXEC;
+        strsec = &shdrs[sh->sh_link];
+        if (strsec->sh_type == SHT_NOBITS || !elf_bytes_fit(len, strsec->sh_offset, strsec->sh_size)) return -ENOEXEC;
+        strtab = (const char *)ehdr + strsec->sh_offset;
+        sym = (const Elf_Sym *)((const char *)ehdr + sh->sh_offset);
+        count = sh->sh_size / sizeof(Elf_Sym);
+        for (s = 0; s < count; s++) {
+            unsigned int ndx = sym[s].st_shndx;
+
+            if (!elf_name_terminated(strtab, strsec->sh_size, sym[s].st_name)) return -ENOEXEC;
+            if (ndx == SHN_UNDEF || ndx == SHN_ABS || ndx == SHN_COMMON) continue;
+            if (ndx >= shnum) return -ENOEXEC;
+        }
+    }
+    return 0;
+}
+
 static int elf_header_check(struct load_info *info)
 {
-    if (info->len <= sizeof(*(info->hdr))) return -ENOEXEC;
+    if (!info->hdr || info->len <= sizeof(*(info->hdr)) || info->len > SZ_128M) return -ENOEXEC;
     if (memcmp(info->hdr->e_ident, ELFMAG, SELFMAG) || info->hdr->e_type != ET_REL || !elf_check_arch(info->hdr) ||
         info->hdr->e_shentsize != sizeof(Elf_Shdr))
         return -ENOEXEC;
-    if (info->hdr->e_shoff >= info->len || (info->hdr->e_shnum * sizeof(Elf_Shdr) > info->len - info->hdr->e_shoff))
-        return -ENOEXEC;
-    return 0;
+    return elf_validate_metadata(info->hdr, info->len);
 }
 
 struct module modules = { 0 };
