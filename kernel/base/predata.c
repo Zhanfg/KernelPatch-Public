@@ -30,21 +30,42 @@ static bool root_superkey_is_set = false;
 
 int auth_superkey(const char *key)
 {
+    size_t slen, klen, i;
     int rc = 0;
-    for (int i = 0; superkey[i]; i++) {
-        rc |= (superkey[i] ^ key[i]);
+
+    if (!key) return 1;
+
+    /*
+     * The saved key lives in a SUPER_KEY_LEN field. A candidate matches only
+     * when it is the same length: a correct key plus any suffix must fail.
+     * XOR the length and every saved byte without returning at the first
+     * mismatch, matching the previous compare.
+     */
+    slen = lib_strnlen(superkey, SUPER_KEY_LEN);
+    klen = lib_strnlen(key, SUPER_KEY_LEN);
+    if (slen == 0 || slen >= SUPER_KEY_LEN || klen == 0 || klen >= SUPER_KEY_LEN) rc = 1;
+    rc |= (int)(slen ^ klen);
+    for (i = 0; i < slen && i < SUPER_KEY_LEN; i++) {
+        unsigned char kb = 0;
+
+        if (klen < SUPER_KEY_LEN && i < klen) kb = (unsigned char)key[i];
+        rc |= (unsigned char)superkey[i] ^ kb;
     }
     if (!rc) goto out;
 
     if (!enable_root_key) goto out;
+    /* Same bound as the plain key: do not hash a truncated or empty field. */
+    if (klen == 0 || klen >= SUPER_KEY_LEN) goto out;
 
     BYTE hash[SHA256_BLOCK_SIZE];
     SHA256_CTX ctx;
     sha256_init(&ctx);
-    sha256_update(&ctx, (const BYTE *)key, lib_strnlen(key, SUPER_KEY_LEN));
+    sha256_update(&ctx, (const BYTE *)key, klen);
     sha256_final(&ctx, hash);
     int len = SHA256_BLOCK_SIZE > ROOT_SUPER_KEY_HASH_LEN ? ROOT_SUPER_KEY_HASH_LEN : SHA256_BLOCK_SIZE;
-    rc = lib_memcmp(root_superkey, hash, len);
+    rc = 0;
+    for (int hi = 0; hi < len; hi++)
+        rc |= (unsigned char)root_superkey[hi] ^ hash[hi];
 
     static bool first_time = true;
     if (!rc && first_time) {
