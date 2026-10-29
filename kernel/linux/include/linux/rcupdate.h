@@ -73,7 +73,7 @@ static inline void rcu_barrier_tasks_rude(void)
 }
 static inline void synchronize_rcu(void)
 {
-    kfunc_call(rcu_barrier_tasks_rude)
+    kfunc_call_void(synchronize_rcu);
 }
 static inline unsigned long get_completed_synchronize_rcu(void)
 {

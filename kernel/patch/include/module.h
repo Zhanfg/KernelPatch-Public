@@ -50,6 +50,9 @@ struct module
 
     void *start;
 
+    int live;
+    int active_refs;
+
     struct list_head list;
 };
 

@@ -17,7 +17,6 @@ MODULE = ROOT / "kernel/patch/module/module.c"
 SUPERCALL = ROOT / "kernel/patch/common/supercall.c"
 
 RCU_FUNCTIONS = {
-    "unload_module",
     "module_control0",
     "module_control1",
     "get_module_nums",
@@ -196,6 +195,20 @@ def check_module(src: str) -> list[str]:
         for needle in ("kpm_list_append", "kpm_list_finish", "out_names[0] = '\\0'"):
             if needle not in body:
                 errors.append(f"list_modules is missing {needle}")
+
+    unload = functions.get("unload_module")
+    if not unload:
+        errors.append("unload_module was not found")
+    else:
+        body = unload[1]
+        masked = unload[2]
+        if "rcu_read_lock" in masked:
+            errors.append("unload_module still takes rcu_read_lock around reclaim")
+        for needle in ("spin_lock(&module_lock)", "list_del_rcu", "module_quiesce"):
+            if needle not in body:
+                errors.append(f"unload_module is missing {needle}")
+        if body.find("kp_free_exec") < body.find("module_quiesce"):
+            errors.append("unload_module frees executable memory before module_quiesce()")
     return errors
 
 
