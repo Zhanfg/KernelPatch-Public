@@ -29,6 +29,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Test KPM list bounds and RCU unlock paths
+        run: |
+          set -euo pipefail
+          gcc -std=gnu11 -Wall -Werror -fsanitize=address,undefined \
+            -o "$RUNNER_TEMP/kpm_query_bounds_test" \
+            tests/kpm_query_bounds_test.c
+          "$RUNNER_TEMP/kpm_query_bounds_test"
+          python3 tests/check_kpm_rcu_paths.py
+
       - name: Verify immutable legacy baseline
         run: |
           set -euo pipefail
