@@ -22,6 +22,7 @@
 #include <syscall.h>
 #include <accctl.h>
 #include <module.h>
+#include <kpm_query.h>
 #include <kputils.h>
 #include <linux/err.h>
 #include <linux/slab.h>
@@ -114,12 +115,16 @@ static long call_kpm_nums()
 
 static long call_kpm_list(char *__user names, int len)
 {
-    if (len <= 0) return -EINVAL;
     char buf[4096];
-    int sz = list_modules(buf, sizeof(buf));
-    if (sz > len) return -ENOBUFS;
-    sz = compat_copy_to_user(names, buf, len);
-    return sz;
+    int filled, copy_len;
+
+    memset(buf, 0, sizeof(buf));
+    filled = list_modules(buf, (int)sizeof(buf));
+    /* len is the caller capacity. Never read past buf or the filled prefix. */
+    copy_len = kpm_bounded_copy_len(filled, len, (int)sizeof(buf));
+    if (copy_len <= 0)
+        return copy_len;
+    return compat_copy_to_user(names, buf, copy_len);
 }
 
 static long call_kpm_info(const char *__user uname, char *__user out_info, int out_len)

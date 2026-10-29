@@ -24,6 +24,8 @@
 #include <linux/rculist.h>
 
 #include "module.h"
+#define KP_KPM_LIST_FORMAT
+#include <kpm_query.h>
 #include "relo.h"
 #include <compact.h>
 #include <selinux_hide.h>
@@ -718,45 +720,65 @@ int get_module_nums()
 
 int list_modules(char *out_names, int size)
 {
-    rcu_read_lock();
-
     struct module *pos;
     int off = 0;
+    int rc = 0;
+
+    if (!out_names || size <= 0)
+        return -EINVAL;
+
+    out_names[0] = '\0';
+    rcu_read_lock();
+
     list_for_each_entry(pos, &modules.list, list)
     {
-        off += snprintf(out_names + off, size - 1 - off, "%s\n", pos->info.name);
+        rc = kpm_list_append(out_names, size, &off, pos->info.name);
+        if (rc)
+            goto out;
     }
-    if (off > 0) out_names[off - 1] = '\0';
+    kpm_list_finish(out_names, off);
+    rc = off;
 
+out:
     rcu_read_unlock();
-    return off;
+    return rc;
 }
 
 int get_module_info(const char *name, char *out_info, int size)
 {
+    int sz = 0;
+    struct module *mod;
+
     if (size <= 0) return 0;
     rcu_read_lock();
 
-    struct module *mod = find_module(name);
-    if (!mod) return -ENOENT;
+    mod = find_module(name);
+    if (!mod) {
+        sz = -ENOENT;
+        goto out;
+    }
 
-    int sz = snprintf(out_info, size - 1,
-                      "name=%s\n"
-                      "version=%s\n"
-                      "license=%s\n"
-                      "author=%s\n"
-                      "description=%s\n"
-                      "args=%s\n",
-                      mod->info.name ?: "unknown",
-                      mod->info.version ?: "0.0.0",
-                      mod->info.license ?: "unknown",
-                      mod->info.author ?: "unknown",
-                      mod->info.description ?: "",
-                      mod->args ?: "");
+    sz = snprintf(out_info, size - 1,
+                  "name=%s\n"
+                  "version=%s\n"
+                  "license=%s\n"
+                  "author=%s\n"
+                  "description=%s\n"
+                  "args=%s\n",
+                  mod->info.name ?: "unknown",
+                  mod->info.version ?: "0.0.0",
+                  mod->info.license ?: "unknown",
+                  mod->info.author ?: "unknown",
+                  mod->info.description ?: "",
+                  mod->args ?: "");
 
-    if (sz > 0) out_info[sz - 1] = '\0';
-    logkfd("%s", out_info);
+    /* snprintf returns the untruncated length, which can be past size. */
+    if (sz > 0 && sz < size)
+        out_info[sz - 1] = '\0';
+    if (sz >= 0 && size > 1)
+        logkfd("%s", out_info);
 
+out:
     rcu_read_unlock();
     return sz;
 }
