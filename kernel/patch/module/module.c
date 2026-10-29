@@ -404,11 +404,21 @@ static int setup_load_info(struct load_info *info)
         return rc;
     }
 
-    int has_kpm_init = find_sec(info, ".kpm.init") || find_sec(info, ".kpm.exit");
-    int has_ko_init = find_sec(info, ".init.text") || find_sec(info, ".exit.text");
+    /* Init is called unconditionally. Exit is optional and is only called when present. */
+    int has_kpm_init = find_sec(info, ".kpm.init");
+    int has_kpm_exit = find_sec(info, ".kpm.exit");
+    int has_ko_init = find_sec(info, ".init.text");
 
     if (!has_kpm_init && !has_ko_init) {
-        logke("no .kpm.init/.kpm.exit or .init.text/.exit.text section\n");
+        logke("no .kpm.init or .init.text section\n");
+        return -ENOEXEC;
+    }
+    if (has_kpm_init && info->sechdrs[has_kpm_init].sh_size < sizeof(mod_initcall_t)) {
+        logke(".kpm.init callback slot is truncated\n");
+        return -ENOEXEC;
+    }
+    if (has_kpm_exit && info->sechdrs[has_kpm_exit].sh_size < sizeof(mod_exitcall_t)) {
+        logke(".kpm.exit callback slot is truncated\n");
         return -ENOEXEC;
     }
 
@@ -641,6 +651,12 @@ long load_module(const void *data, int len, const char *args, const char *event,
     /* Mark this KPM as loading (for crash detection) */
     kpm_safety_mark_loading(info->info.name);
 
+    if (!mod->init || !*mod->init) {
+        logke("module %s has no init callback\n", mod->info.name ? mod->info.name : "?");
+        rc = -ENOEXEC;
+        goto free;
+    }
+
     rc = (*mod->init)(mod->args, event, reserved);
 
     if (!rc) {
@@ -649,7 +665,7 @@ long load_module(const void *data, int len, const char *args, const char *event,
         goto out;
     } else {
         logkfi("[%s] failed with [%s] error: %d, try exit ...\n", mod->info.name, args, rc);
-        (*mod->exit)(reserved);
+        if (mod->exit && *mod->exit) (*mod->exit)(reserved);
     }
 
 free:
