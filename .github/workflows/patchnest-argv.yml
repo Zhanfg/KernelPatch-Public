@@ -1,0 +1,28 @@
+name: KPM argv v1 header smoke
+on:
+  pull_request:
+    paths:
+      - 'kernel/include/patchnest_argv_v1.h'
+      - 'tests/patchnest_argv_v1_test.c'
+      - '.github/workflows/patchnest-argv.yml'
+  push:
+    branches:
+      - integration/exp-lkm-isolated-20261031
+    paths:
+      - 'kernel/include/patchnest_argv_v1.h'
+      - 'tests/patchnest_argv_v1_test.c'
+      - '.github/workflows/patchnest-argv.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - run: |
+          set -euo pipefail
+          for cc in gcc clang; do
+            "$cc" -std=c11 -Wall -Wextra -Werror -pedantic -O2 tests/patchnest_argv_v1_test.c -o "/tmp/argv-v1-$cc"
+            "/tmp/argv-v1-$cc"
+          done
