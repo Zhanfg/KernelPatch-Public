@@ -194,6 +194,17 @@ jobs:
           test -s kpimg-linux-current
           sha256sum kpimg-linux-current
 
+      - name: Compile PNARGV1 example KPM for ARM64
+        run: |
+          set -euo pipefail
+          TARGET_COMPILE="$TOOLCHAIN" make -C kpms/demo-argv KP_DIR=../.. clean
+          TARGET_COMPILE="$TOOLCHAIN" make -C kpms/demo-argv KP_DIR=../.. \
+            CFLAGS="-Wall -Wextra -Werror=implicit-function-declaration -Werror=int-conversion"
+          test -s kpms/demo-argv/argv_demo.kpm
+          "${TOOLCHAIN}readelf" -h kpms/demo-argv/argv_demo.kpm | grep -q AArch64
+          "${TOOLCHAIN}readelf" -SW kpms/demo-argv/argv_demo.kpm | grep -q '.kpm.init'
+          "${TOOLCHAIN}readelf" -SW kpms/demo-argv/argv_demo.kpm | grep -q '.kpm.ctl0'
+
       - name: Audit current kpimg linker layout
         run: |
           set -euo pipefail
@@ -233,6 +244,7 @@ jobs:
           name: kernelpatch-current-${{ github.sha }}
           path: |
             kpimg-linux-current
+            kpms/demo-argv/argv_demo.kpm
             kptools-android-current
             layout-audit/
           if-no-files-found: warn
