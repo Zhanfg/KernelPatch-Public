@@ -1,0 +1,27 @@
+name: EXP compatibility pass 1 (host-only)
+on:
+  pull_request:
+    paths:
+      - 'kernel/base/hotpatch.c'
+      - 'kernel/include/patchnest_argv_v1.h'
+      - 'kpms/demo-argv/**'
+      - 'tests/check_exp_compat.py'
+      - 'tests/patchnest_argv_v1_test.c'
+      - '.github/workflows/exp-compat.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Check scoped compatibility backport
+        run: python3 tests/check_exp_compat.py
+      - name: Verify original PNARGV1 contract under GCC and Clang
+        run: |
+          set -euo pipefail
+          for cc in gcc clang; do
+            "$cc" -std=c11 -Wall -Wextra -Werror -pedantic -O2 tests/patchnest_argv_v1_test.c -o "/tmp/patchnest-argv-$cc"
+            "/tmp/patchnest-argv-$cc"
+          done
