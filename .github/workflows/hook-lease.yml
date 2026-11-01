@@ -1,0 +1,23 @@
+name: Hook lease v1 host contract
+on:
+  pull_request:
+    paths:
+      - 'include/patchnest/hook_lease_v1.h'
+      - 'tests/patchnest_hook_lease_v1_test.c'
+      - '.github/workflows/hook-lease.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: GCC / Clang host lease state-machine tests
+        run: |
+          set -euo pipefail
+          for cc in gcc clang; do
+            "$cc" -std=c11 -Wall -Wextra -Werror -pedantic -O2 \
+              tests/patchnest_hook_lease_v1_test.c -o "/tmp/lease-v1-$cc"
+            "/tmp/lease-v1-$cc"
+          done
