@@ -541,6 +541,14 @@ static int elf_validate_metadata(const Elf_Ehdr *ehdr, unsigned long len)
         if (sh->sh_type != SHT_NOBITS && !elf_bytes_fit(len, sh->sh_offset, sh->sh_size)) return -ENOEXEC;
         if (!elf_name_terminated(shstr, shstrsz, sh->sh_name)) return -ENOEXEC;
 
+        /* Each KPM callback section is read as a complete function pointer. */
+        if ((sh->sh_flags & SHF_ALLOC) && sh->sh_size < sizeof(mod_initcall_t) &&
+            (!strcmp(shstr + sh->sh_name, ".kpm.init") ||
+             !strcmp(shstr + sh->sh_name, ".kpm.exit") ||
+             !strcmp(shstr + sh->sh_name, ".kpm.ctl0") ||
+             !strcmp(shstr + sh->sh_name, ".kpm.ctl1") ||
+             !strcmp(shstr + sh->sh_name, ".kpm.event"))) return -ENOEXEC;
+
         if (sh->sh_type == SHT_SYMTAB || sh->sh_type == SHT_DYNSYM || sh->sh_type == SHT_REL || sh->sh_type == SHT_RELA) {
             if (sh->sh_link >= shnum) return -ENOEXEC;
         }
@@ -967,7 +975,7 @@ int get_module_info(const char *name, char *out_info, int size)
         goto out;
     }
 
-    sz = snprintf(out_info, size - 1,
+    sz = snprintf(out_info, size,
                   "name=%s\n"
                   "version=%s\n"
                   "license=%s\n"
@@ -981,10 +989,14 @@ int get_module_info(const char *name, char *out_info, int size)
                   mod->info.description ?: "",
                   mod->args ?: "");
 
-    /* snprintf returns the untruncated length, which can be past size. */
-    if (sz > 0 && sz < size)
+    /* Never expose snprintf's would-be length as initialized output bytes. */
+    if (sz >= size) {
+        sz = -ENOBUFS;
+        goto out;
+    }
+    if (sz > 0)
         out_info[sz - 1] = '\0';
-    if (sz >= 0 && size > 1)
+    if (sz >= 0)
         logkfd("%s", out_info);
 
 out:
