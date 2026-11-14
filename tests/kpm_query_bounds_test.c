@@ -1,6 +1,7 @@
 /* Host checks for the KPM list copy bound and name formatter. */
 #include <errno.h>
 #include <limits.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -224,8 +225,115 @@ static void test_many_names_stop_at_capacity(void)
     free(buf);
 }
 
+#ifdef KPM_QUERY_MODULE_TEST
+#include <elf.h>
+typedef void (*mod_initcall_t)(void);
+typedef Elf64_Ehdr Elf_Ehdr;
+typedef Elf64_Shdr Elf_Shdr;
+typedef Elf64_Sym Elf_Sym;
+#define SZ_128M 0x08000000
+struct module {
+    struct { const char *name, *version, *license, *author, *description; } info;
+    const char *args;
+};
+static struct module sample = { .info = { .name = "sample" } };
+static int rcu_depth, copies;
+#define rcu_read_lock() (++rcu_depth)
+#define rcu_read_unlock() (--rcu_depth)
+#define logkfd(...) ((void)0)
+static struct module *find_module(const char *name)
+{
+    return strcmp(name, "sample") == 0 ? &sample : NULL;
+}
+static int compat_strncpy_from_user(char *out, const char *in, size_t size)
+{
+    size_t len = strlen(in);
+    if (len >= size) return -EINVAL;
+    memcpy(out, in, len + 1);
+    return (int)len;
+}
+static int compat_copy_to_user(char *out, const char *in, int size)
+{
+    ++copies;
+    memcpy(out, in, (size_t)size);
+    return 0;
+}
+#include "kpm_query_module_under_test.h"
+
+static void test_module_info_copy(void)
+{
+    char out[8192], large[4096];
+    int capacity;
+    memset(large, 'x', sizeof(large) - 1);
+    large[sizeof(large) - 1] = 0;
+    sample.args = large;
+    copies = 0;
+    expect_int("oversized module info", call_kpm_info("sample", out, sizeof(out)), -ENOBUFS);
+    expect_int("oversized info not copied", copies, 0);
+    expect_int("oversized info RCU balanced", rcu_depth, 0);
+    sample.args = "";
+    expect_int("normal module info", call_kpm_info("sample", out, sizeof(out)), 0);
+    expect_str("normal info text", out,
+               "name=sample\nversion=0.0.0\nlicense=unknown\nauthor=unknown\ndescription=\nargs=");
+    expect_int("missing module", call_kpm_info("missing", out, sizeof(out)), -ENOENT);
+    expect_int("missing info RCU balanced", rcu_depth, 0);
+    /* Exact-size and one-byte destinations must be terminated or rejected. */
+    for (capacity = 1; capacity <= 100; ++capacity) {
+        int rc;
+        memset(out, 0xa5, sizeof(out));
+        rc = get_module_info("sample", out, capacity);
+        if (rc >= 0) {
+            expect_int("info length fits", rc <= capacity, 1);
+            expect_int("info result includes nul", rc > 0 && out[rc - 1] == 0, 1);
+        } else {
+            expect_int("small info rejected", rc, -ENOBUFS);
+        }
+        expect_int("info RCU balanced", rcu_depth, 0);
+    }
+}
+
+static void test_callback_slot_bounds(void)
+{
+    struct {
+        Elf_Ehdr header;
+        Elf_Shdr sections[3];
+        char names[32];
+        char payload[16];
+    } image = {0};
+    const char *names[] = { ".kpm.ctl0", ".kpm.ctl1", ".kpm.event" };
+    size_t i, size;
+    image.header.e_shoff = offsetof(__typeof__(image), sections);
+    image.header.e_shnum = 3;
+    image.header.e_shstrndx = 1;
+    image.sections[1].sh_type = SHT_STRTAB;
+    image.sections[1].sh_offset = offsetof(__typeof__(image), names);
+    image.sections[1].sh_size = sizeof(image.names);
+    image.sections[2].sh_name = 1;
+    image.sections[2].sh_type = SHT_PROGBITS;
+    image.sections[2].sh_flags = SHF_ALLOC;
+    image.sections[2].sh_offset = offsetof(__typeof__(image), payload);
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        strcpy(image.names + 1, names[i]);
+        for (size = 0; size <= 8; ++size) {
+            image.sections[2].sh_size = size;
+            expect_int(names[i], elf_validate_metadata(&image.header, sizeof(image)),
+                       size < 8 ? -ENOEXEC : 0);
+        }
+    }
+    image.sections[2].sh_offset = ~0UL - 3;
+    image.sections[2].sh_size = 8;
+    expect_int("wrapped section end", elf_validate_metadata(&image.header, sizeof(image)), -ENOEXEC);
+    image.header.e_shoff = ~0UL;
+    expect_int("wrapped section table", elf_validate_metadata(&image.header, sizeof(image)), -ENOEXEC);
+}
+#endif
+
 int main(void)
 {
+#ifdef KPM_QUERY_MODULE_TEST
+    test_callback_slot_bounds();
+    test_module_info_copy();
+#endif
     test_copy_bounds();
     test_empty_and_exact_names();
     test_truncation_stays_inside_allocation();

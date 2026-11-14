@@ -24,6 +24,25 @@ int main(void)
     huge[sizeof(huge) - 1] = 0;
     const char *one[] = { huge };
     assert(pn_argv_encode(1, one, wire, sizeof(wire)) == PN_ARGV_NO_SPACE);
+    assert(pn_argv_decode("PNARGV1:0:", NULL, 0) == 0);
+    assert(pn_argv_decode("PNARGV1:1:0:", args, 1) == 1);
+    assert(args[0].length == 0);
+    assert(pn_argv_decode("PNARGV1:0:extra", args, 5) == PN_ARGV_INVALID);
+    assert(pn_argv_decode("PNARGV1:18446744073709551616:", args, 5) == PN_ARGV_INVALID);
+    assert(pn_argv_decode("PNARGV1:1:18446744073709551616:x", args, 5) == PN_ARGV_INVALID);
+    memset(wire, 'x', sizeof(wire));
+    assert(pn_argv_decode(wire, args, 5) == PN_ARGV_INVALID);
+    /* 8-byte prefix + count + colon + 5-byte length field + payload + NUL. */
+    memset(huge, 'x', 1008);
+    huge[1008] = 0;
+    assert(pn_argv_encode(1, one, wire, sizeof(wire)) == PN_ARGV_OK);
+    assert(strlen(wire) == sizeof(wire) - 1);
+    assert(pn_argv_decode(wire, args, 1) == 1);
+    assert(args[0].length == 1008);
+    assert(memcmp(args[0].data, huge, 1008) == 0);
+    huge[1008] = 'x';
+    huge[1009] = 0;
+    assert(pn_argv_encode(1, one, wire, sizeof(wire)) == PN_ARGV_NO_SPACE);
     puts("PatchNest argv v1 tests: PASS");
     return 0;
 }

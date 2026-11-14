@@ -47,6 +47,17 @@ int main(void)
     assert(pn_lease_claim(&table, 1, PN_LEASE_DOMAIN_VFS, 0, &t) == PN_LEASE_ERR_EXHAUSTED);
     assert(pn_lease_lookup(&table, PN_LEASE_DOMAIN_SYSCALL, 45, &snapshot) == PN_LEASE_ERR_STALE);
 
+    pn_lease_init(&table);
+    table.last_token = UINT64_MAX - 1;
+    assert(pn_lease_claim(&table, 1, PN_LEASE_DOMAIN_VFS, 7, &first) == PN_LEASE_OK);
+    assert(first == UINT64_MAX);
+    assert(pn_lease_transition(&table, 1, first, PN_LEASE_DRAINING, 0) == PN_LEASE_OK);
+    assert(pn_lease_transition(&table, 1, first, PN_LEASE_EMPTY, 2) == PN_LEASE_ERR_STATE);
+    assert(pn_lease_lookup(&table, PN_LEASE_DOMAIN_VFS, 7, &snapshot) == PN_LEASE_OK);
+    assert(snapshot.state == PN_LEASE_DRAINING && snapshot.token == first);
+    assert(pn_lease_transition(&table, 1, first, PN_LEASE_EMPTY, 1) == PN_LEASE_OK);
+    assert(pn_lease_claim(&table, 1, PN_LEASE_DOMAIN_VFS, 7, &t) == PN_LEASE_ERR_EXHAUSTED);
+    assert(pn_lease_lookup(&table, PN_LEASE_DOMAIN_VFS, 7, &snapshot) == PN_LEASE_ERR_STALE);
     puts("PatchNest hook lease v1 host tests: PASS");
     return 0;
 }

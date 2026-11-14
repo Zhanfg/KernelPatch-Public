@@ -9,6 +9,9 @@ copy that uses the raw user length as the source size.
 from __future__ import annotations
 
 import re
+import os
+import subprocess
+import tempfile
 import sys
 from pathlib import Path
 
@@ -281,10 +284,39 @@ out:
     return errors
 
 
+def check_host_behavior() -> list[str]:
+    # Compile the actual function bodies with host substitutes for kernel APIs.
+    sources = {MODULE: find_functions(MODULE.read_text()),
+               SUPERCALL: find_functions(SUPERCALL.read_text())}
+    selected = [
+        (MODULE, "static int elf_bytes_fit(unsigned long file_len, unsigned long off, unsigned long size)", "elf_bytes_fit"),
+        (MODULE, "static int elf_name_terminated(const char *strings, unsigned long size, unsigned long off)", "elf_name_terminated"),
+        (MODULE, "static int elf_validate_metadata(const Elf_Ehdr *ehdr, unsigned long len)", "elf_validate_metadata"),
+        (MODULE, "int get_module_info(const char *name, char *out_info, int size)", "get_module_info"),
+        (SUPERCALL, "static long call_kpm_info(const char *uname, char *out_info, int out_len)", "call_kpm_info"),
+    ]
+    with tempfile.TemporaryDirectory(prefix="kpm-host-") as directory:
+        tmp = Path(directory)
+        header = "\n".join(signature + "\n" + sources[path][name][1]
+                           for path, signature, name in selected)
+        (tmp / "kpm_query_module_under_test.h").write_text(header)
+        command = [os.environ.get("CC", "gcc"), "-std=gnu11", "-Wall", "-Werror",
+                   "-fsanitize=address,undefined", "-DKPM_QUERY_MODULE_TEST",
+                   "-I", directory, str(ROOT / "tests/kpm_query_bounds_test.c"),
+                   "-o", str(tmp / "test")]
+        try:
+            subprocess.run(command, check=True)
+            subprocess.run([str(tmp / "test")], check=True)
+        except subprocess.CalledProcessError as error:
+            return [f"host behavior regression failed: {error}"]
+    return []
+
+
 def main() -> int:
     errors = self_test()
     errors.extend(check_module(MODULE.read_text()))
     errors.extend(check_supercall(SUPERCALL.read_text()))
+    errors.extend(check_host_behavior())
     if errors:
         for error in errors:
             print(error, file=sys.stderr)
