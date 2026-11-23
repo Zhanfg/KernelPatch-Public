@@ -4,7 +4,7 @@
  */
 
 #include <ktypes.h>
-#include <uapi/scdefs.h>
+#include <supercall_access.h>
 #include <hook.h>
 #include <common.h>
 #include <log.h>
@@ -151,16 +151,6 @@ static long call_su(struct su_profile *__user uprofile)
     return rc;
 }
 
-static long call_su_task(pid_t pid, struct su_profile *__user uprofile)
-{
-    struct su_profile *profile = memdup_user(uprofile, sizeof(struct su_profile));
-    if (!profile || IS_ERR(profile)) return PTR_ERR(profile);
-    profile->scontext[sizeof(profile->scontext) - 1] = '\0';
-    int rc = task_su(pid, profile->to_uid, profile->scontext);
-    kvfree(profile);
-    return rc;
-}
-
 static long call_skey_get(char *__user out_key, int out_len)
 {
     const char *key = get_superkey();
@@ -273,7 +263,7 @@ static long call_kstorage_write(int gid, long did, void *data, int offset, int d
 
 static long call_list_kstorage_ids(int gid, long *ids, int ids_len)
 {
-    return list_kstorage_ids(gid, ids, ids_len, false);
+    return list_kstorage_ids(gid, ids, ids_len, true);
 }
 
 static long call_kstorage_remove(int gid, long did)
@@ -356,8 +346,11 @@ static long call_umount_list(char __user *out, int size)
     return compat_copy_to_user(out, buf, sz);
 }
 
-static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, long arg4)
+static long supercall(enum supercall_role role, long cmd, long arg1, long arg2, long arg3, long arg4)
 {
+    int rc = supercall_access(role, cmd);
+    if (rc) return rc;
+
     switch (cmd) {
     case SUPERCALL_HELLO:
         logki(SUPERCALL_HELLO_ECHO "\n");
@@ -374,15 +367,9 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
     case SUPERCALL_AP_LOAD_PACKAGE_CONFIG:
         return call_ap_load_package_config();
     #endif
-    }
-
-    switch (cmd) {
     case SUPERCALL_SU:
         if (kp_safe_mode) return -EACCES;
         return call_su((struct su_profile * __user) arg1);
-    case SUPERCALL_SU_TASK:
-        if (kp_safe_mode) return -EACCES;
-        return call_su_task((pid_t)arg1, (struct su_profile * __user) arg2);
 
     case SUPERCALL_SU_GRANT_UID:
         return call_grant_uid((struct su_profile * __user) arg1);
@@ -404,10 +391,9 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
         return call_su_set_allow_sctx((char *__user)arg1);
 
     case SUPERCALL_KSTORAGE_READ:
-        return call_kstorage_read((int)arg1, (long)arg2, (void *)arg3, (int)((long)arg4 >> 32), (long)arg4 << 32 >> 32);
+        return call_kstorage_read((int)arg1, arg2, (void *)arg3, (int)((u64)arg4 >> 32), (int)arg4);
     case SUPERCALL_KSTORAGE_WRITE:
-        return call_kstorage_write((int)arg1, (long)arg2, (void *)arg3, (int)((long)arg4 >> 32),
-                                   (long)arg4 << 32 >> 32);
+        return call_kstorage_write((int)arg1, arg2, (void *)arg3, (int)((u64)arg4 >> 32), (int)arg4);
     case SUPERCALL_KSTORAGE_LIST_IDS:
         return call_list_kstorage_ids((int)arg1, (long *)arg2, (int)arg3);
     case SUPERCALL_KSTORAGE_REMOVE:
@@ -463,34 +449,18 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
         return 0;
     }
 
-    default:
-        break;
-    }
-
-    switch (cmd) {
     case SUPERCALL_BOOTLOG:
         return call_bootlog();
     case SUPERCALL_PANIC:
         return call_panic();
     case SUPERCALL_TEST:
         return call_test(arg1, arg2, arg3);
-    default:
-        break;
-    }
-
-    if (!is_authed) return -EPERM;
-
-    switch (cmd) {
     case SUPERCALL_SKEY_GET:
         return call_skey_get((char *__user)arg1, (int)arg2);
     case SUPERCALL_SKEY_SET:
         return call_skey_set((char *__user)arg1);
     case SUPERCALL_SKEY_ROOT_ENABLE:
         return call_skey_root_enable((int)arg1);
-        break;
-    }
-
-    switch (cmd) {
     case SUPERCALL_KPM_LOAD:
         return call_kpm_load((const char *__user)arg1, (const char *__user)arg2, (void *__user)arg3);
     case SUPERCALL_KPM_UNLOAD:
@@ -511,14 +481,9 @@ static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, 
     /* SELinux policy operations (authed only) */
     case SUPERCALL_SEPOLICY_CMD:
         return sepolicy_apply((const void __user *)arg1, (int)arg2);
-    }
-
-    switch (cmd) {
     default:
-        break;
+        return -ENOSYS;
     }
-
-    return -ENOSYS;
 }
 
 int is_trusted_manager_uid(uid_t uid)
@@ -534,25 +499,22 @@ static void before(hook_fargs6_t *args, void *udata)
     int uid = current_uid();
     if (get_ap_mod_exclude(uid)) return;
 
-    int is_trusted_caller = 0;
-    int is_authed = 0;
+    enum supercall_role role = SUPERCALL_ROLE_NONE;
     if (has_preset_superkey()) {
         const char *__user key_user = (const char *__user)syscall_argn(args, 0);
         
         char key[MAX_KEY_LEN];
         long len = compat_strncpy_from_user(key, key_user, MAX_KEY_LEN);
         if (len <= 0) return;
-        is_authed = !auth_superkey(key);
-        is_trusted_caller = is_authed;
+        if (!auth_superkey(key)) role = SUPERCALL_ROLE_ADMIN;
     }
     if (is_trusted_manager_uid(uid)) {
-        is_trusted_caller = 1;
-        is_authed = 1;
-    } else if (is_su_allow_uid(uid)) {
-        is_trusted_caller = 1;
+        role = SUPERCALL_ROLE_ADMIN;
+    } else if (role == SUPERCALL_ROLE_NONE && is_su_allow_uid(uid)) {
+        role = SUPERCALL_ROLE_SU;
     }
 
-    if (!is_trusted_caller) return;
+    if (role == SUPERCALL_ROLE_NONE) return;
 
     long ver_xx_cmd = (long)syscall_argn(args, 1);
     long cmd = ver_xx_cmd & 0xFFFF;
@@ -568,7 +530,7 @@ static void before(hook_fargs6_t *args, void *udata)
     long a4 = (long)syscall_argn(args, 5);
 
     args->skip_origin = 1;
-    args->ret = supercall(is_authed, cmd, a1, a2, a3, a4);
+    args->ret = supercall(role, cmd, a1, a2, a3, a4);
 }
 
 int supercall_install()

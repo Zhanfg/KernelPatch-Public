@@ -13,8 +13,6 @@
 #include <linux/capability.h>
 #include <linux/security.h>
 #include <asm/current.h>
-#include <linux/pid.h>
-#include <linux/sched/task.h>
 #include <linux/sched.h>
 #include <linux/seccomp.h>
 #include <asm/thread_info.h>
@@ -126,50 +124,11 @@ int commit_su(uid_t to_uid, const char *sctx)
     }
 }
 
-// todo: rcu
 int task_su(pid_t pid, uid_t to_uid, const char *sctx)
 {
-    int rc = 0;
-    int scontext_changed = 0;
-    struct task_struct *task = find_get_task_by_vpid(pid);
-    if (!task) {
-        logkfe("no such pid: %d\n", pid);
-        return -ESRCH;
-    }
-    struct task_ext *ext = get_task_ext(task);
-
-    if (unlikely(!task_ext_valid(ext))) {
-        logkfe("dirty task_ext, pid(maybe dirty): %d\n", ext->pid);
-        rc = -ENOMEM;
-        goto out;
-    }
-
-    struct thread_info *thi = get_task_thread_info(task);
-    thi->flags &= ~(_TIF_SECCOMP);
-
-    if (task_struct_offset.comm_offset > 0) {
-        struct seccomp *seccomp = (struct seccomp *)((uintptr_t)task + task_struct_offset.seccomp_offset);
-        seccomp->mode = SECCOMP_MODE_DISABLED;
-        // only be called when the task is exiting, so no barriers
-        // todo: WARN_ON(tsk->sighand != NULL);
-        // seccomp_filter_release(task);
-    }
-
-    struct cred *cred = *(struct cred **)((uintptr_t)task + task_struct_offset.cred_offset);
-    su_cred(cred, to_uid);
-    if (sctx && sctx[0]) scontext_changed = !set_security_override_from_ctx(cred, sctx);
-
-    struct cred *real_cred = *(struct cred **)((uintptr_t)task + task_struct_offset.real_cred_offset);
-    if (cred != real_cred) {
-        su_cred(real_cred, to_uid);
-        if (sctx && sctx[0]) scontext_changed = scontext_changed && !set_security_override_from_ctx(real_cred, sctx);
-    }
-    ext->priv_sel_allow = !scontext_changed;
-
-    logkfi("pid: %d, tgid: %d, to_uid: %d, sctx: %s, via_hook: %d\n", ext->pid, ext->tgid, to_uid, sctx,
-           ext->priv_sel_allow);
-out:
-    return rc;
+    /* Published credentials can be shared. A remote update needs a
+     * replacement protocol that owns the target task and its credentials. */
+    return -EOPNOTSUPP;
 }
 
 /* Safe mode flag — set by userspace via SUPERCALL_SET_SAFEMODE */

@@ -24,9 +24,9 @@ SuperCall 复用 Linux syscall 号 **45**（在大多数 Linux/Android 系统上
 
 ## 认证
 
-每次 SuperCall 都需要以 **superkey** 作为第一个参数。superkey 是一个最长 64 字节的以 null 结尾的字符串（`SUPERCALL_KEY_MAX_LEN`）。
+每次 SuperCall 都以密钥字符串作为第一个参数。superkey 是一个最长 64 字节的以 null 结尾的字符串（`SUPERCALL_KEY_MAX_LEN`）。
 
-特权操作（内核日志、模块管理、密钥管理）需要真实的 superkey。部分只读操作在调用方 UID 已被授予 SU 权限时也接受字符串 `"su"`。
+全局策略变更、内核日志、模块管理和密钥管理需要经过 superkey 认证或使用可信 manager UID，这两种管理员访问方式等价。已获 SU 权限的 UID 可以使用 `"su"` 执行受支持的查询和切换当前线程的凭据。
 
 ## 使用 C API
 
@@ -82,7 +82,7 @@ struct su_profile {
 // 将当前线程切换为 profile 中指定的凭据
 long sc_su(const char *key, struct su_profile *profile);
 
-// 将指定 TID 的线程切换为 profile 中指定的凭据
+// 对所有 TID 禁用，包括当前线程。切换当前线程请使用 sc_su。
 long sc_su_task(const char *key, pid_t tid, struct su_profile *profile);
 
 // 永久授予某 UID 的 SU 权限
@@ -100,6 +100,8 @@ long sc_su_allow_uids(const char *key, uid_t *buf, int num);
 // 获取指定 UID 的 SU profile
 long sc_su_uid_profile(const char *key, uid_t uid, struct su_profile *out_profile);
 ```
+
+可信调用方调用 `sc_su_task` 时会失败，`errno` 为 `EOPNOTSUPP`。
 
 ### SU 路径管理
 
@@ -202,7 +204,7 @@ long sc_skey_root_enable(const char *key, bool enable);
 | `SUPERCALL_SKEY_SET` | 0x100b | 设置 superkey |
 | `SUPERCALL_SKEY_ROOT_ENABLE` | 0x100c | 启用 root 哈希验证 |
 | `SUPERCALL_SU` | 0x1010 | 当前线程提权 |
-| `SUPERCALL_SU_TASK` | 0x1011 | 指定线程提权 |
+| `SUPERCALL_SU_TASK` | 0x1011 | 已禁用。当前线程请使用 `SUPERCALL_SU`。 |
 | `SUPERCALL_KPM_LOAD` | 0x1020 | 加载 KPM |
 | `SUPERCALL_KPM_UNLOAD` | 0x1021 | 卸载 KPM |
 | `SUPERCALL_KPM_CONTROL` | 0x1022 | 控制 KPM |

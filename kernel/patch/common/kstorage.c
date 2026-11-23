@@ -166,6 +166,10 @@ int read_kstorage(int gid, long did, void *data, int offset, int len, bool data_
         return PTR_ERR(pos);
     }
 
+    if (offset < 0 || offset > pos->dlen || len < 0) {
+        rcu_read_unlock();
+        return -EINVAL;
+    }
     int min_len = pos->dlen - offset > len ? len : pos->dlen - offset;
 
     if (data_is_user) {
@@ -200,9 +204,10 @@ int list_kstorage_ids(int gid, long *ids, int idslen, bool data_is_user)
 
         if (data_is_user) {
             int cplen = compat_copy_to_user(ids + cnt, &pos->did, sizeof(pos->did));
-            if (cplen <= 0) {
+            if (cplen != sizeof(pos->did)) {
                 logkfe("compat_copy_to_user error: %d", cplen);
-                cnt = cplen;
+                cnt = cplen < 0 ? cplen : -EFAULT;
+                break;
             }
         } else {
             memcpy(ids + cnt, &pos->did, sizeof(pos->did));
