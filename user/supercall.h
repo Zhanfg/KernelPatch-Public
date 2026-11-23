@@ -16,6 +16,11 @@
 #include "uapi/scdefs.h"
 #include "version"
 
+/* A trusted manager UID has the same administrator access as an authenticated
+ * superkey. Global policy changes and kernel logging require administrator access.
+ * An SU-allowed UID may use "su" for supported queries and current-thread SU.
+ */
+
 /// KernelPatch version is greater than or equal to 0x0a05
 static inline long ver_and_cmd(const char *key, long cmd)
 {
@@ -51,7 +56,7 @@ static inline bool sc_ready(const char *key)
 /**
  * @brief Print messages by printk in the kernel
  * 
- * @param key : superkey or 'su' string if caller uid is su allowed 
+ * @param key : superkey or any nonempty string for a trusted manager
  * @param msg 
  * @return long 
  */
@@ -121,13 +126,13 @@ static inline long sc_su(const char *key, struct su_profile *profile)
 }
 
 /**
- * @brief Substitute user of tid specfied thread
+ * @brief Disabled for every TID. Use sc_su for the current thread.
  * 
  * @param key : superkey or 'su' string if caller uid is su allowed 
  * @param tid : target thread id
- * @param profile : if scontext is invalid or illegal, all selinux permission checks will bypass via hook
+ * @param profile Unused
  * @see struct su_profile
- * @return long : 0 if succeed 
+ * @return long : -1 with errno set to EOPNOTSUPP for a trusted caller
  */
 static inline long sc_su_task(const char *key, pid_t tid, struct su_profile *profile)
 {
@@ -358,7 +363,7 @@ static inline long sc_su_get_all_allow_sctx(const char *key, char *out_sctx, int
 /**
  * @brief Reset current all-allowed selinux context
  * 
- * @param key : superkey or 'su' string if caller uid is su allowed  
+ * @param key : superkey or any nonempty string for a trusted manager
  * @param sctx If sctx is empty string, clear all-allowed selinux, 
  * otherwise, try to reset a new all-allowed selinux context
  * @return long 0 if succeed

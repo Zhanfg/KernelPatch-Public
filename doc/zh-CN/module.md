@@ -234,7 +234,7 @@ KPM_EXIT(hello_exit);
 | 符号 | 说明 |
 |------|------|
 | `commit_su(uid, sctx)` | 将当前任务凭据切换到 `uid`，SELinux 上下文为 `sctx` |
-| `task_su(pid, to_uid, sctx)` | 切换指定任务的凭据 |
+| `task_su(pid, to_uid, sctx)` | 对所有 PID 返回 `-EOPNOTSUPP`。当前任务请使用 `commit_su`。 |
 | `is_su_allow_uid(uid)` | 检查某 UID 是否拥有 SU 权限 |
 | `su_add_allow_uid(uid, to_uid, sctx)` | 授予某 UID 的 SU 权限 |
 | `su_remove_allow_uid(uid)` | 撤销某 UID 的 SU 权限 |

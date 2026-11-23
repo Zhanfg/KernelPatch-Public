@@ -24,9 +24,9 @@ In practice, use the `supercall.h` wrapper functions—they handle encoding auto
 
 ## Authentication
 
-Every SuperCall requires a **superkey** as its first argument. The superkey is a null-terminated string up to 64 bytes (`SUPERCALL_KEY_MAX_LEN`).
+Every SuperCall takes a key string as its first argument. A superkey is a null-terminated string up to 64 bytes (`SUPERCALL_KEY_MAX_LEN`).
 
-Privileged operations (kernel logging, module management, key management) require the actual superkey. Some read-only operations also accept the string `"su"` if the calling process's UID has been granted SU access.
+Global policy changes, kernel logging, module management, and key management require an authenticated superkey or a trusted manager UID. These two forms of administrator access are equivalent. A caller whose UID has SU access can use `"su"` for supported queries and to switch the current thread's credentials.
 
 ## Using the C API
 
@@ -82,7 +82,7 @@ struct su_profile {
 // Switch the current thread to the credentials in profile
 long sc_su(const char *key, struct su_profile *profile);
 
-// Switch a specific thread (by TID) to the credentials in profile
+// Disabled for every TID, including the current thread. Use sc_su for the current thread.
 long sc_su_task(const char *key, pid_t tid, struct su_profile *profile);
 
 // Permanently grant SU access for a UID
@@ -100,6 +100,8 @@ long sc_su_allow_uids(const char *key, uid_t *buf, int num);
 // Get SU profile for a specific UID
 long sc_su_uid_profile(const char *key, uid_t uid, struct su_profile *out_profile);
 ```
+
+For a trusted caller, `sc_su_task` fails with `errno` set to `EOPNOTSUPP`.
 
 ### SU Path Management
 
@@ -202,7 +204,7 @@ long sc_skey_root_enable(const char *key, bool enable);
 | `SUPERCALL_SKEY_SET` | 0x100b | Set superkey |
 | `SUPERCALL_SKEY_ROOT_ENABLE` | 0x100c | Enable root hash |
 | `SUPERCALL_SU` | 0x1010 | SU current thread |
-| `SUPERCALL_SU_TASK` | 0x1011 | SU specific thread |
+| `SUPERCALL_SU_TASK` | 0x1011 | Disabled. Use `SUPERCALL_SU` for the current thread. |
 | `SUPERCALL_KPM_LOAD` | 0x1020 | Load KPM |
 | `SUPERCALL_KPM_UNLOAD` | 0x1021 | Unload KPM |
 | `SUPERCALL_KPM_CONTROL` | 0x1022 | Control KPM |

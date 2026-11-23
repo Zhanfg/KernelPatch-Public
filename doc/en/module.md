@@ -236,7 +236,7 @@ Typed convenience wrappers `hook_wrap0`–`hook_wrap12` and `fp_hook_wrap0`–`f
 | Symbol | Description |
 |--------|-------------|
 | `commit_su(uid, sctx)` | Switch current task credentials to `uid` with SELinux context `sctx` |
-| `task_su(pid, to_uid, sctx)` | Switch credentials of a specific task |
+| `task_su(pid, to_uid, sctx)` | Returns `-EOPNOTSUPP` for every PID. Use `commit_su` for the current task. |
 | `is_su_allow_uid(uid)` | Check if a UID has SU access |
 | `su_add_allow_uid(uid, to_uid, sctx)` | Grant SU access to a UID |
 | `su_remove_allow_uid(uid)` | Revoke SU access from a UID |
