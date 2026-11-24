@@ -3,6 +3,10 @@
  * Copyright (C) 2024 bmax121. All Rights Reserved.
  */
 
+#define _POSIX_C_SOURCE 200809L
+#include <limits.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "common.h"
 #include "order.h"
 
@@ -12,7 +16,7 @@ int can_b_imm(uint64_t from, uint64_t to)
 {
     // B: 128M
     uint32_t imm26 = 1 << 25 << 2;
-    return (to >= from && to - from <= imm26) || (from >= to && from - to <= imm26);
+    return (to >= from && to - from < imm26) || (from >= to && from - to <= imm26);
 }
 
 int b(uint32_t *buf, uint64_t from, uint64_t to)
@@ -61,6 +65,7 @@ int read_exact(FILE *fp, void *buf, size_t size, const char *path)
 
 int read_file_align(const char *path, char **con, int *out_len, int align, int limit)
 {
+    if (!path) tools_loge_exit("missing input file path\n");
     FILE *fp = fopen(path, "rb");
     if (!fp) tools_log_errno_exit("open file %s\n", path);
     int len = bounded_file_size(fp, path, limit);
@@ -70,20 +75,76 @@ int read_file_align(const char *path, char **con, int *out_len, int align, int l
     char *buf = malloc(padded ? padded : 1);
     if (!buf) tools_loge_exit("cannot allocate buffer for %s\n", path);
     if (read_exact(fp, buf, len, path)) exit(EXIT_FAILURE);
-    fclose(fp);
+    if (fgetc(fp) != EOF || ferror(fp))
+        tools_loge_exit("incomplete read or size changed for %s\n", path);
+    if (fclose(fp)) tools_log_errno_exit("close %s", path);
     memset(buf + len, 0, padded - len);
     *con = buf;
     *out_len = (int)padded;
     return len;
 }
 
-void write_file(const char *path, const char *con, int len, bool append)
+static int write_parts(FILE *fp, const file_part_t *parts, size_t count)
 {
-    FILE *fout = fopen(path, append ? "ab" : "wb");
-    if (!fout) tools_log_errno_exit("open file %s\n", path);
-    int writelen = fwrite(con, 1, len, fout);
-    if (writelen != len) tools_log_errno_exit("write file %s\n", path);
-    fclose(fout);
+    static const char zeros[4096];
+    for (size_t i = 0; i < count; ++i) {
+        size_t len = parts[i].len;
+        if (parts[i].data && len) {
+            if (fwrite(parts[i].data, 1, len, fp) != len) return -1;
+        } else {
+            while (len) {
+                size_t n = len < sizeof(zeros) ? len : sizeof(zeros);
+                if (fwrite(zeros, 1, n, fp) != n) return -1;
+                len -= n;
+            }
+        }
+    }
+    return 0;
+}
+
+void write_file_parts(const char *path, const file_part_t *parts, size_t count)
+{
+    struct stat st;
+    int exists = lstat(path, &st) == 0;
+    if (!exists && errno != ENOENT) tools_log_errno_exit("stat %s", path);
+    FILE *fp;
+    char *tmp = NULL;
+    if (!exists || S_ISREG(st.st_mode)) {
+        tmp = malloc(strlen(path) + sizeof(".XXXXXX"));
+        if (!tmp) tools_log_errno_exit("allocate output path");
+        sprintf(tmp, "%s.XXXXXX", path);
+        int fd = mkstemp(tmp);
+        if (fd < 0) tools_log_errno_exit("create output for %s", path);
+        mode_t mask = umask(0);
+        umask(mask);
+        if (fchmod(fd, exists ? st.st_mode & 0777 : 0666 & ~mask) || !(fp = fdopen(fd, "wb"))) {
+            close(fd);
+            unlink(tmp);
+            tools_loge_exit("cannot open output for %s\n", path);
+        }
+    } else {
+        fp = fopen(path, "wb");
+        if (!fp) tools_log_errno_exit("open %s", path);
+    }
+    int rc = write_parts(fp, parts, count) || ferror(fp);
+    if (fclose(fp) || rc || (tmp && rename(tmp, path))) {
+        if (tmp) unlink(tmp);
+        tools_loge_exit("failed to write %s\n", path);
+    }
+    free(tmp);
+}
+
+void write_file(const char *path, const void *con, size_t len, bool append)
+{
+    file_part_t part = { con, len };
+    if (!append) {
+        write_file_parts(path, &part, 1);
+        return;
+    }
+    FILE *fp = fopen(path, "ab");
+    if (!fp) tools_log_errno_exit("open %s", path);
+    int rc = write_parts(fp, &part, 1);
+    if (fclose(fp) || rc) tools_loge_exit("failed to append %s\n", path);
 }
 
 int64_t int_unpack(void *ptr, int32_t size, bool is_be)
