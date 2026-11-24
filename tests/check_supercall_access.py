@@ -17,6 +17,7 @@ HARNESS = r'''
 #include <string.h>
 #include <sys/types.h>
 #include <supercall_access.h>
+#include <kpm_boot_count.h>
 
 typedef struct { long args[6], ret; int skip_origin; } hook_fargs6_t;
 enum { UNKNOWN_UID, SU_UID, MANAGER_UID };
@@ -39,6 +40,18 @@ static long compat_strncpy_from_user(char *dest, const char *src, size_t size)
     strcpy(dest, src);
     return strlen(dest) + 1;
 }
+
+static int copy_size = sizeof(struct kpm_safety_status);
+static int compat_copy_to_user(void *dst, const void *src, size_t size)
+{
+    assert(size == sizeof(struct kpm_safety_status));
+    memcpy(dst, src, copy_size);
+    return copy_size;
+}
+
+static struct kpm_boot_attempt boot;
+#define spin_lock(lock) ((void)0)
+#define spin_unlock(lock) ((void)0)
 
 static int handled(void) { calls++; return 0; }
 #define logki(...) handled()
@@ -107,7 +120,20 @@ int main(void)
     assert(invoke(SU_UID, "su", SUPERCALL_SU) == -EACCES);
     assert(invoke(UNKNOWN_UID, "test-key", SUPERCALL_SU_TASK) == -EOPNOTSUPP);
     assert(invoke(SU_UID, "su", SUPERCALL_SAFETY_STATUS) == -EPERM);
-    assert(invoke(UNKNOWN_UID, "test-key", SUPERCALL_SAFETY_STATUS) == -ENOSYS);
+    struct kpm_safety_status status = { 0 };
+    boot.count = 2;
+    boot.errors = KPM_COUNT_DATA_ERROR;
+    assert(supercall(SUPERCALL_ROLE_ADMIN, SUPERCALL_SAFETY_STATUS, (long)&status, 0, 0, 0) == 0);
+    assert(status.boot_count == 2 && status.safe_mode == 1 && status.storage_errors == KPM_COUNT_DATA_ERROR);
+    boot.count = -1;
+    boot.errors |= KPM_COUNT_EARLY_ERROR;
+    kp_safe_mode = 0;
+    assert(supercall(SUPERCALL_ROLE_ADMIN, SUPERCALL_SAFETY_STATUS, (long)&status, 0, 0, 0) == 0);
+    assert(status.boot_count == -1 && status.safe_mode == 0 && status.storage_errors == boot.errors);
+    assert(supercall(SUPERCALL_ROLE_ADMIN, SUPERCALL_SAFETY_STATUS, 0, 0, 0, 0) == -EFAULT);
+    copy_size--;
+    assert(supercall(SUPERCALL_ROLE_ADMIN, SUPERCALL_SAFETY_STATUS, (long)&status, 0, 0, 0) == -EFAULT);
+    assert(invoke(UNKNOWN_UID, "test-key", SUPERCALL_MAX) == -ENOSYS);
     assert(invoke(UNKNOWN_UID, "test-key", SUPERCALL_MAX + 1) == ORIGINAL);
     assert(invoke(MANAGER_UID, NULL, SUPERCALL_HELLO) == ORIGINAL);
     excluded = 1;
@@ -129,8 +155,11 @@ def main():
     dispatch = functions["supercall"][1]
     # Replace only leaf call_* handlers. Keep authorization and routing intact.
     handlers = sorted(set(re.findall(r"\b(call_\w+)\(", functions["supercall"][2])))
-    code = [f"#define {name}(...) handled()" for name in handlers]
+    safety = find_functions(SOURCE.with_name("kpm_safety.c").read_text())
+    code = [f"#define {name}(...) handled()" for name in handlers if name != "call_safety_status"]
     code += [
+        "void kpm_safety_get_status(struct kpm_safety_status *status)", safety["kpm_safety_get_status"][1],
+        "static long call_safety_status(struct kpm_safety_status *out)", functions["call_safety_status"][1],
         "static long supercall(enum supercall_role role, long cmd, long arg1, long arg2, long arg3, long arg4)",
         dispatch,
         "int is_trusted_manager_uid(uid_t uid)", functions["is_trusted_manager_uid"][1],

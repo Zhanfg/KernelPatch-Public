@@ -7,7 +7,7 @@
  * 2. Pre-load validation: check ELF structure before loading
  * 3. Faulty KPM blacklist: skip modules that caused crashes
  *
- * All state persisted via filesystem (/data/adb/kp-next/).
+ * Counter storage is probed at initialization and may be unavailable.
  */
 
 #include <ktypes.h>
@@ -19,72 +19,96 @@
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <uapi/asm-generic/errno.h>
-#include <kputils.h>
+#include <linux/kernel.h>
+#include <linux/spinlock.h>
+#include <accctl.h>
+#include <kpm_safety.h>
+#include <kpm_boot_count.h>
 
 /* ============================================================
  * Configuration
  * ============================================================ */
 
 #define BOOT_COUNT_FILE    "/data/adb/kp-next/boot_count"
-#define BOOT_CONFIRM_FILE  "/data/adb/kp-next/boot_confirmed"
+#define EARLY_BOOT_COUNT_FILE "/dev/.kp_bootcount"
 #define BLACKLIST_FILE     "/data/adb/kp-next/kpm_blacklist"
 #define LAST_KPM_FILE      "/data/adb/kp-next/kpm_last_loaded"
-#define BOOT_COUNT_MAX     3  /* max failed boots before safe mode */
 
 /* ============================================================
  * File I/O helpers (kernel-side)
  * ============================================================ */
 
-static int read_file_int(const char *path, int default_val)
+static struct {
+    const char *path;
+    int digits; /* width read during init, for in-place updates of older records */
+} count_files[KPM_COUNT_STORES] = {
+    [KPM_EARLY_STORE] = { .path = EARLY_BOOT_COUNT_FILE },
+    [KPM_DATA_STORE] = { .path = BOOT_COUNT_FILE },
+};
+
+/* Accept the original decimal files and an optional trailing newline. */
+static int read_count(enum kpm_count_store store)
 {
-    struct file *f;
-    char buf[16];
+    char buf[12];
+    size_t used = 0;
+    int value = 0;
     loff_t pos = 0;
-    int val;
+    const char *path = count_files[store].path;
+    struct file *f = filp_open(path, O_RDONLY, 0);
+    int rc;
 
-    f = filp_open(path, O_RDONLY, 0);
-    if (!f || IS_ERR(f)) return default_val;
-
-    memset(buf, 0, sizeof(buf));
-    kernel_read(f, buf, sizeof(buf) - 1, &pos);
-    filp_close(f, 0);
-
-    val = 0;
-    for (int i = 0; buf[i] >= '0' && buf[i] <= '9'; i++) {
-        val = val * 10 + (buf[i] - '0');
+    if (IS_ERR_OR_NULL(f)) {
+        rc = f ? PTR_ERR(f) : -EIO;
+        if (rc == -ENOENT) return rc; /* try exclusive creation */
+        goto error;
     }
-    return val > 0 ? val : default_val;
+    while (used < sizeof(buf)) {
+        rc = kernel_read(f, buf + used, sizeof(buf) - used, &pos);
+        if (rc <= 0) break;
+        used += rc;
+    }
+    filp_close(f, 0);
+    if (rc < 0) goto error;
+    rc = -EINVAL;
+    if (used && buf[used - 1] == '\n') used--;
+    if (used == 0 || used > 10) goto error;
+    for (size_t i = 0; i < used; i++) {
+        int digit = buf[i] - '0';
+        if (digit < 0 || digit > 9 || value > (__INT_MAX__ - digit) / 10) goto error;
+        value = value * 10 + digit;
+    }
+    count_files[store].digits = used;
+    return value;
+
+error:
+    log_boot("kpm_safety: cannot read counter %s (%d)\n", path, rc);
+    return rc;
 }
 
-static void write_file_int(const char *path, int val)
+static int write_count(enum kpm_count_store store, int count, bool exclusive)
 {
-    struct file *f;
-    char buf[16];
-    loff_t pos = 0;
-    int len;
+    const char *path = count_files[store].path;
+    int flags = O_WRONLY;
+    if (exclusive) flags |= O_CREAT | O_EXCL;
+    if (!count) flags |= O_CREAT | O_TRUNC; /* explicit confirmation */
+    struct file *f = filp_open(path, flags, 0644);
+    int rc;
 
-    f = filp_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (!f || IS_ERR(f)) return;
-
-    len = 0;
-    if (val == 0) {
-        buf[0] = '0';
-        len = 1;
+    if (IS_ERR_OR_NULL(f)) {
+        rc = f ? PTR_ERR(f) : -EIO;
     } else {
-        int tmp = val;
-        char rev[16];
-        int i = 0;
-        while (tmp > 0 && i < 15) {
-            rev[i++] = '0' + (tmp % 10);
-            tmp /= 10;
-        }
-        for (int j = 0; j < i; j++) {
-            buf[j] = rev[i - 1 - j];
-        }
-        len = i;
+        /* Keep the decimal file format and avoid truncating known history on open. */
+        char buf[12];
+        int width = count ? count_files[store].digits : 0;
+        int len = snprintf(buf, sizeof(buf), "%0*d", width, count);
+        loff_t pos = 0;
+        rc = kernel_write(f, buf, len, &pos);
+        int close_rc = filp_close(f, 0);
+        if (rc == len && !close_rc) return 0;
+        if (rc >= 0) rc = close_rc ? close_rc : -EIO;
     }
-    kernel_write(f, buf, len, &pos);
-    filp_close(f, 0);
+    log_boot("kpm_safety: cannot write counter %s (%d)\n", path, rc);
+    return rc;
 }
 
 static int read_file_string(const char *path, char *out, int maxlen)
@@ -135,70 +159,28 @@ static void append_file_string(const char *path, const char *str)
 
 /* ============================================================
  * 1. Boot Counter
- *
- * TWO-TIER approach:
- * - /dev/.kp_bootcount: available early (tmpfs), survives warm reboots
- * - /data/adb/kp-next/boot_count: persistent, available after /data mount
- *
- * For embedded KPMs (loaded before /data mount):
- *   Use /dev/.kp_bootcount — incremented at module_init()
- *
- * For filesystem KPMs (loaded after /data mount):
- *   Use /data/adb/kp-next/boot_count — incremented at first load
- *
- * Both reset to 0 when boot_completed is confirmed.
  * ============================================================ */
 
-#define EARLY_BOOT_COUNT_FILE "/dev/.kp_bootcount"
-#define MAX_BOOT_COUNT 3
+static const struct kpm_count_io count_io = { .read = read_count, .write = write_count };
+static struct kpm_boot_attempt boot = { .count = -1 };
+static DEFINE_SPINLOCK(boot_lock);
+static bool reset_in_progress;
 
-static int boot_count = 0;
-
-int kpm_safety_check_boot_count(void)
+void kpm_safety_init(void)
 {
-    /* Try persistent count first (/data mount) */
-    boot_count = read_file_int(BOOT_COUNT_FILE, 0);
-
-    /* Also check early count (/dev tmpfs) — survives warm reboot */
-    int early_count = read_file_int(EARLY_BOOT_COUNT_FILE, 0);
-    if (early_count > boot_count) {
-        boot_count = early_count;
-    }
-
-    boot_count++;
-    write_file_int(BOOT_COUNT_FILE, boot_count);
-    write_file_int(EARLY_BOOT_COUNT_FILE, boot_count);
-
-    log_boot("kpm_safety: boot count = %d (max %d)\n", boot_count, MAX_BOOT_COUNT);
-
-    if (boot_count >= MAX_BOOT_COUNT) {
-        log_boot("kpm_safety: SAFE MODE — too many failed boots (%d)\n", boot_count);
-        return 1; /* safe mode */
-    }
-    return 0; /* normal */
-}
-
-/* Increment early boot counter (called before /data mount) */
-void kpm_safety_early_count(void)
-{
-    int count = read_file_int(EARLY_BOOT_COUNT_FILE, 0);
-    count++;
-    write_file_int(EARLY_BOOT_COUNT_FILE, count);
-    log_boot("kpm_safety: early boot count = %d\n", count);
-
-    if (count >= MAX_BOOT_COUNT) {
-        extern int kp_safe_mode;
+    if (!kpm_boot_start(&boot, &count_io)) return;
+    if (boot.count >= KPM_BOOT_LIMIT) {
         kp_safe_mode = 1;
-        log_boot("kpm_safety: EARLY SAFE MODE — count=%d\n", count);
+        log_boot("kpm_safety: safe mode activated due to boot counter\n");
     }
+    log_boot("kpm_safety: boot count=%d storage_errors=%#x\n", boot.count, boot.errors);
 }
 
-void kpm_safety_confirm_boot(void)
+void kpm_safety_get_status(struct kpm_safety_status *status)
 {
-    /* Called when boot_completed is reached */
-    write_file_int(BOOT_COUNT_FILE, 0);
-    write_file_string(BOOT_CONFIRM_FILE, "1");
-    log_boot("kpm_safety: boot confirmed, counter reset\n");
+    spin_lock(&boot_lock);
+    *status = kpm_boot_status(&boot, kp_safe_mode);
+    spin_unlock(&boot_lock);
 }
 
 /* ============================================================
@@ -278,7 +260,9 @@ int kpm_safety_check_blacklist(const char *kpm_name)
     read_file_string(LAST_KPM_FILE, last_kpm_name, sizeof(last_kpm_name));
 
     /* If we're on a retry boot and the last KPM matches, skip it */
-    if (boot_count > 1 && last_kpm_name[0] &&
+    struct kpm_safety_status status;
+    kpm_safety_get_status(&status);
+    if (status.boot_count > 1 && last_kpm_name[0] &&
         !strncmp(last_kpm_name, kpm_name, sizeof(last_kpm_name))) {
         log_boot("kpm_safety: BLACKLISTED — %s caused previous crash\n", kpm_name);
         return 1; /* blacklisted */
@@ -315,12 +299,25 @@ void kpm_safety_mark_loading(const char *kpm_name)
 
 void kpm_safety_confirm_boot_completed(void)
 {
-    /* Clear ALL safety markers */
-    write_file_int(BOOT_COUNT_FILE, 0);
-    write_file_int(EARLY_BOOT_COUNT_FILE, 0);
-    write_file_string(LAST_KPM_FILE, "");
-    /* Don't clear explicit blacklist — user manages that */
-    log_boot("kpm_safety: boot completed, all safety markers cleared\n");
+    struct kpm_boot_attempt updated;
+    spin_lock(&boot_lock);
+    if (reset_in_progress || (boot.confirmed && !boot.errors)) {
+        spin_unlock(&boot_lock);
+        return;
+    }
+    reset_in_progress = true;
+    updated = boot;
+    spin_unlock(&boot_lock);
+
+    /* File operations may sleep. Publish the finished snapshot as a unit. */
+    if (!updated.confirmed) write_file_string(LAST_KPM_FILE, "");
+    kpm_boot_confirm(&updated, &count_io);
+
+    spin_lock(&boot_lock);
+    boot = updated;
+    reset_in_progress = false;
+    spin_unlock(&boot_lock);
+    log_boot("kpm_safety: boot completed, counter reset errors=%#x\n", updated.errors);
 }
 
 void kpm_safety_add_to_blacklist(const char *kpm_name)
@@ -335,13 +332,4 @@ void kpm_safety_clear_blacklist(void)
 {
     write_file_string(BLACKLIST_FILE, "");
     log_boot("kpm_safety: blacklist cleared\n");
-}
-
-/* ============================================================
- * Initialization
- * ============================================================ */
-
-void kpm_safety_init(void)
-{
-    log_boot("kpm_safety: initialized\n");
 }

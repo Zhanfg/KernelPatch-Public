@@ -64,6 +64,7 @@ static inline int supercall_access(enum supercall_role role, long cmd)
     case SUPERCALL_UMOUNT_ADD:
     case SUPERCALL_UMOUNT_REMOVE:
     case SUPERCALL_UMOUNT_ENABLE:
+    case SUPERCALL_SAFETY_STATUS:
     case SUPERCALL_SAFETY_BL_CLEAR:
     case SUPERCALL_SAFETY_BL_ADD:
     case SUPERCALL_KPM_LOAD:
