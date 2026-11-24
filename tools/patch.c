@@ -7,6 +7,7 @@
 #define __USE_GNU
 
 #include <errno.h>
+#include <stddef.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <stdio.h>
@@ -116,55 +117,42 @@ const char *extra_type_str(extra_item_type extra_type)
     }
 }
 
-static char *bytes_to_hexstr(const unsigned char *data, int len)
+static int print_preset_info(const preset_t *preset, size_t available)
 {
-    char *buf = (char *)malloc(2 * len + 1);
-    buf[2 * len] = '\0';
-    for (int i = 0; i < len; i++) {
-        sprintf(&buf[2 * i], "%02x", data[i]);
-    }
-    return buf;
-}
-
-void print_preset_info(preset_t *preset)
-{
-    setup_header_t *header = &preset->header;
-    setup_preset_t *setup = &preset->setup;
+    if (available < sizeof(setup_header_t)) return -ENOEXEC;
+    const setup_header_t *header = &preset->header;
     version_t ver = header->kp_version;
     uint32_t ver_num = (ver.major << 16) + (ver.minor << 8) + ver.patch;
     bool is_android = header->config_flags & CONFIG_ANDROID;
     bool is_debug = header->config_flags & CONFIG_DEBUG;
 
+    /* The additional field moved when the root-key hash was introduced. */
+    size_t offset = offsetof(preset_t, setup.additional);
+    if (ver_num <= 0xa04) offset -= ROOT_SUPER_KEY_HASH_LEN + SETUP_PRESERVE_LEN;
+    if (offset + ADDITIONAL_LEN > available) return -ENOEXEC;
+
     fprintf(stdout, INFO_KP_IMG_SESSION "\n");
     fprintf(stdout, "version=0x%x\n", ver_num);
-    fprintf(stdout, "compile_time=%s\n", header->compile_time);
+    fprintf(stdout, "compile_time=%.*s\n", (int)sizeof(header->compile_time), header->compile_time);
     fprintf(stdout, "config=%s,%s\n", is_android ? "android" : "linux", is_debug ? "debug" : "release");
-    fprintf(stdout, "superkey=%s\n", setup->superkey);
+    fprintf(stdout, "superkey=<redacted>\n");
 
     // todo: remove compat version
     if (ver_num > 0xa04) {
-        char *hexstr = bytes_to_hexstr(setup->root_superkey, ROOT_SUPER_KEY_HASH_LEN);
-        fprintf(stdout, "root_superkey=%s\n", hexstr);
-        free(hexstr);
+        fprintf(stdout, "root_superkey=<redacted>\n");
     }
 
     fprintf(stdout, INFO_ADDITIONAL_SESSION "\n");
-    char *addition = setup->additional;
-    // todo: remove compat version
-    if (ver_num <= 0xa04) {
-        addition -= (ROOT_SUPER_KEY_HASH_LEN + SETUP_PRESERVE_LEN);
-    }
-    char *pos = addition;
-    while (pos < addition + ADDITIONAL_LEN) {
-        int len = *pos;
+    const char *pos = (const char *)preset + offset;
+    const char *end = pos + ADDITIONAL_LEN;
+    while (pos < end) {
+        unsigned int len = (unsigned char)*pos++;
         if (!len) break;
-        pos++;
-        char backup = *(pos + len);
-        *(pos + len) = 0;
-        fprintf(stdout, "%s\n", pos);
-        *(pos + len) = backup;
+        if (len > (size_t)(end - pos)) return -ENOEXEC;
+        fprintf(stdout, "%.*s\n", (int)len, pos);
         pos += len;
     }
+    return 0;
 }
 
 int print_kp_image_info_path(const char *kpimg_path)
@@ -177,10 +165,10 @@ int print_kp_image_info_path(const char *kpimg_path)
     if (get_preset(kpimg, len) != preset) {
         rc = -ENOENT;
     } else {
-        print_preset_info(preset);
-        fprintf(stdout, "\n");
-        free(kpimg);
+        rc = print_preset_info(preset, len);
+        if (!rc) fprintf(stdout, "\n");
     }
+    free(kpimg);
     return rc;
 }
 
@@ -322,7 +310,7 @@ int print_image_patch_info(patched_kimg_t *pimg)
     fprintf(stdout, "patched=%s\n", preset ? "true" : "false");
 
     if (preset) {
-        print_preset_info(preset);
+        print_preset_info(preset, pimg->kimg_len - ((char *)preset - pimg->kimg));
 
         fprintf(stdout, INFO_EXTRA_SESSION "\n");
         fprintf(stdout, "num=%d\n", pimg->embed_item_num);
@@ -390,6 +378,26 @@ static int disable_pi_map(char *img, size_t len)
     return (int)(pos - img) + 8;
 }
 
+static void set_image_superkey(setup_preset_t *setup, const char *superkey, bool root_key)
+{
+    if (!root_key) {
+        tools_logi("superkey set\n");
+        strncpy((char *)setup->superkey, superkey, SUPER_KEY_LEN - 1);
+    } else if (superkey && superkey[0] != '\0') {
+        int len = SHA256_BLOCK_SIZE > ROOT_SUPER_KEY_HASH_LEN ? ROOT_SUPER_KEY_HASH_LEN : SHA256_BLOCK_SIZE;
+        BYTE buf[SHA256_BLOCK_SIZE];
+        SHA256_CTX ctx;
+        sha256_init(&ctx);
+        sha256_update(&ctx, (const BYTE *)superkey, strnlen(superkey, SUPER_KEY_LEN));
+        sha256_final(&ctx, buf);
+        memcpy(setup->root_superkey, buf, len);
+        tools_logi("root superkey hash set\n");
+    } else {
+        memset(setup->root_superkey, 0, ROOT_SUPER_KEY_HASH_LEN);
+        tools_logi("root_key mode with empty superkey: root_superkey zeroed\n");
+    }
+}
+
 int patch_update_img(const char *kimg_path, const char *kpimg_path, const char *out_path, const char *superkey,
                      bool root_key, const char **additional, extra_config_t *extra_configs, int extra_config_num)
 {
@@ -426,7 +434,7 @@ int patch_update_img(const char *kimg_path, const char *kpimg_path, const char *
     // kpimg
     char *kpimg = NULL;
     int kpimg_len = 0;
-    read_file_align(kpimg_path, &kpimg, &kpimg_len, 0x10);
+    read_file_align(kpimg_path, &kpimg, &kpimg_len, 0x10, IMAGE_MAX_FILE_SIZE);
 
     if (kpimg_len <= SZ_4K || get_preset(kpimg, kpimg_len) != (preset_t *)kpimg)
         tools_loge_exit("invalid or truncated kpimg header\n");
@@ -454,15 +462,17 @@ int patch_update_img(const char *kimg_path, const char *kpimg_path, const char *
             const char *path = config->path;
             char *data;
             int len = 0;
-            read_file_align(path, &data, &len, EXTRA_ALIGN);
+            int limit = config->extra_type == EXTRA_TYPE_KPM ? KPM_MAX_FILE_SIZE : IMAGE_MAX_FILE_SIZE;
+            int file_len = read_file_align(path, &data, &len, EXTRA_ALIGN, limit);
             config->data = data;
             item->con_size = len;
             // if name not set
             if (!config->set_name) {
                 if (config->extra_type == EXTRA_TYPE_KPM) {
                     kpm_info_t kpm_info = { 0 };
-                    int rc = get_kpm_info(data, len, &kpm_info);
+                    int rc = get_kpm_info(data, file_len, &kpm_info);
                     if (rc) tools_loge_exit("can get infomation of kpm, path: %s\n", path);
+                    if (strlen(kpm_info.name) >= sizeof(item->name)) tools_loge_exit("KPM name too long\n");
                     strcpy(item->name, kpm_info.name);
                 } else {
                     char *rsp = strrchr(path, '/');
@@ -623,24 +633,7 @@ int patch_update_img(const char *kimg_path, const char *kpimg_path, const char *
     fillin_patch_config(&kallsym, kallsym_kimg, ori_kimg_len, &setup->patch_config, kinfo->is_be, 0);
 
     // superkey
-    if (!root_key) {
-        tools_logi("superkey: %s\n", superkey);
-        strncpy((char *)setup->superkey, superkey, SUPER_KEY_LEN - 1);
-    } else if (superkey && superkey[0] != '\0') {
-        int len = SHA256_BLOCK_SIZE > ROOT_SUPER_KEY_HASH_LEN ? ROOT_SUPER_KEY_HASH_LEN : SHA256_BLOCK_SIZE;
-        BYTE buf[SHA256_BLOCK_SIZE];
-        SHA256_CTX ctx;
-        sha256_init(&ctx);
-        sha256_update(&ctx, (const BYTE *)superkey, strnlen(superkey, SUPER_KEY_LEN));
-        sha256_final(&ctx, buf);
-        memcpy(setup->root_superkey, buf, len);
-        char *hexstr = bytes_to_hexstr(setup->root_superkey, len);
-        tools_logi("root superkey hash: %s\n", hexstr);
-        free(hexstr);
-    } else {
-        memset(setup->root_superkey, 0, ROOT_SUPER_KEY_HASH_LEN);
-        tools_logi("root_key mode with empty superkey: root_superkey zeroed\n");
-    }
+    set_image_superkey(setup, superkey, root_key);
 
     // modify kernel entry
     int paging_init_offset = get_symbol_offset_exit(&kallsym, kallsym_kimg, "paging_init");
@@ -750,13 +743,14 @@ int reset_key(const char *kimg_path, const char *out_path, const char *superkey)
     preset_t *preset = get_preset(kernel_file.kimg, kernel_file.kimg_len);
     if (!preset) tools_loge_exit("not patched kernel image\n");
 
-    char *origin_key = strdup((char *)preset->setup.superkey);
-    strcpy((char *)preset->setup.superkey, superkey);
-    tools_logi("reset superkey: %s -> %s\n", origin_key, preset->setup.superkey);
+    if (kernel_file.kimg_len - ((char *)preset - kernel_file.kimg) < (int)offsetof(preset_t, setup.root_superkey))
+        tools_loge_exit("truncated superkey field\n");
+    memset(preset->setup.superkey, 0, sizeof(preset->setup.superkey));
+    memcpy(preset->setup.superkey, superkey, strlen(superkey));
+    tools_logi("superkey reset\n");
 
     write_kernel_file(&kernel_file, out_path);
 
-    free(origin_key);
     free_kernel_file(&kernel_file);
 
     return 0;
