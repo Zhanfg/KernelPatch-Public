@@ -227,6 +227,8 @@ static void test_many_names_stop_at_capacity(void)
 
 #ifdef KPM_QUERY_MODULE_TEST
 #include <elf.h>
+#include <stdint.h>
+#include "../include/kpm_elf.h"
 typedef void (*mod_initcall_t)(void);
 typedef Elf64_Ehdr Elf_Ehdr;
 typedef Elf64_Shdr Elf_Shdr;

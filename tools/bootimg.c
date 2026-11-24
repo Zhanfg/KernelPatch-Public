@@ -403,10 +403,16 @@ int decompress_lzma(const uint8_t *src, size_t srcSize, uint8_t **dst, uint32_t 
     return 0;
 }
 
+static compress_head compression_header(const uint8_t *data, size_t size)
+{
+    compress_head head = { 0 };
+    memcpy(&head, data, size < sizeof(head) ? size : sizeof(head));
+    return head;
+}
+
 int auto_depress(const uint8_t *data, size_t size, const char *out_path) {
     if (size < 4) return -1;
-    compress_head k_head;
-    memcpy(&k_head, data, sizeof(k_head));
+    compress_head k_head = compression_header(data, size);
     int method = detect_compress_method(k_head);
     tools_logi("Auto-detect compression method: %d\n", method);
     
@@ -646,47 +652,69 @@ int auto_depress(const uint8_t *data, size_t size, const char *out_path) {
     return -1;
 }
 
-int extract_kernel(const char *bootimg_path) {
+static int read_boot_header(FILE *fp, const char *path, struct boot_img_hdr *hdr)
+{
+    int rc = read_exact(fp, hdr, sizeof(*hdr), path);
+    if (rc) return rc;
+    if (memcmp(hdr->magic, "ANDROID!", 8)) {
+        fprintf(stderr, "invalid boot image magic: %s\n", path);
+        return -EINVAL;
+    }
+    return 0;
+}
+
+static int read_boot_kernel(FILE *fp, const char *path, uint32_t total, uint32_t offset,
+                            uint32_t size, uint8_t **out)
+{
+    if (size > IMAGE_MAX_FILE_SIZE) {
+        fprintf(stderr, "kernel too large: %s\n", path);
+        return -EFBIG;
+    }
+    if (offset > total || size > total - offset) {
+        fprintf(stderr, "short read: kernel extends beyond %s\n", path);
+        return -EIO;
+    }
+    if (offset < sizeof(struct boot_img_hdr) || size < 4) {
+        fprintf(stderr, "invalid kernel offset or size: %s\n", path);
+        return -EINVAL;
+    }
+    if (fseek(fp, offset, SEEK_SET)) {
+        fprintf(stderr, "cannot seek to kernel: %s\n", path);
+        return -EIO;
+    }
+    uint8_t *buf = malloc(size);
+    if (!buf) return -ENOMEM;
+    int rc = read_exact(fp, buf, size, path);
+    if (rc) {
+        free(buf);
+        return rc;
+    }
+    *out = buf;
+    return 0;
+}
+
+int extract_kernel(const char *bootimg_path)
+{
     FILE *fp = fopen(bootimg_path, "rb");
     if (!fp) {
-        tools_logi("Error: Cannot open %s\n", bootimg_path);
+        fprintf(stderr, "cannot open %s\n", bootimg_path);
         return -1;
     }
-    
     struct boot_img_hdr hdr;
-    fread(&hdr, sizeof(hdr), 1, fp);
-
-    if (memcmp(hdr.magic, "ANDROID!", 8) != 0) {
-        tools_logi("Error: Invalid boot image magic.\n");
-        fclose(fp);
-        return -2;
+    int total = bounded_file_size(fp, bootimg_path, IMAGE_MAX_FILE_SIZE);
+    int rc = total < 0 ? total : read_boot_header(fp, bootimg_path, &hdr);
+    uint8_t *kernel_data = NULL;
+    if (!rc) {
+        uint32_t version = hdr.unused[0];
+        uint32_t offset = version >= 3 && version <= 10 ? 4096 : hdr.page_size;
+        tools_logi("Kernel size: %u,Header Version: %u, Offset: %u\n", hdr.kernel_size, version, offset);
+        rc = read_boot_kernel(fp, bootimg_path, total, offset, hdr.kernel_size, &kernel_data);
     }
-
-    uint32_t page_size = hdr.page_size;
-    uint32_t kernel_offset = page_size; // Kernel starts after the first page
-    if (hdr.unused[0] >= 3) {
-        kernel_offset = 4096;
-    }
-    if (hdr.unused[0] > 10) {
-        kernel_offset = page_size;
-    }
-
-    tools_logi("Kernel size: %d,Header Version: %d, Offset: %d\n", hdr.kernel_size, hdr.unused[0], kernel_offset);
-
-    uint8_t *kernel_data = malloc(hdr.kernel_size);
-    if (!kernel_data) {
-        fclose(fp);
-        return -3;
-    }
-
-    fseek(fp, kernel_offset, SEEK_SET);
-    fread(kernel_data, 1, hdr.kernel_size, fp);
     fclose(fp);
-
-    int res = auto_depress(kernel_data, hdr.kernel_size, "kernel");
-
+    if (rc) return rc;
+    rc = auto_depress(kernel_data, hdr.kernel_size, "kernel");
     free(kernel_data);
-    return res;
+    return rc;
 }
 
 int detect_compress_method(compress_head data) {
@@ -734,22 +762,18 @@ int repack_bootimg(const char *orig_boot_path,
     struct boot_img_hdr hdr;
     struct avb_footer avb;
     uint32_t extracted_size = 0;
-    fread(&hdr, sizeof(hdr), 1, f_orig);
-
-    if (memcmp(hdr.magic, "ANDROID!", 8) != 0) {
-        tools_logi("Not a valid Android Boot Image.\n");
+    int input_size = bounded_file_size(f_orig, orig_boot_path, IMAGE_MAX_FILE_SIZE);
+    int rc = input_size < 0 ? input_size : read_boot_header(f_orig, orig_boot_path, &hdr);
+    if (rc) {
         fclose(f_orig);
-        return -2;
+        return rc;
     }
-
-    fseek(f_orig, 0, SEEK_END);
-    long total_size = ftell(f_orig);
-
-    uint32_t avb_size = 0;
-    //uint8_t *foot_buf = NULL;
-    //foot_buf = malloc(64);
-    fseek(f_orig, total_size-sizeof(avb), SEEK_SET);
-    fread(&avb, sizeof(avb), 1, f_orig);
+    long total_size = input_size;
+    if (fseek(f_orig, total_size - (long)sizeof(avb), SEEK_SET) ||
+        read_exact(f_orig, &avb, sizeof(avb), orig_boot_path)) {
+        fclose(f_orig);
+        return -EIO;
+    }
 
     uint32_t header_ver = hdr.unused[0]; 
     if (header_ver > 10){header_ver = 0;extracted_size = hdr.unused[0];}
@@ -758,13 +782,14 @@ int repack_bootimg(const char *orig_boot_path,
 
     tools_logi("Header Version: %u, Page Size: %u, fmt_size: %u\n", header_ver, page_size,fmt_size);
 
-    uint8_t *old_k_full = malloc(hdr.kernel_size);
-    fseek(f_orig, page_size, SEEK_SET);
-    fread(old_k_full, 1, hdr.kernel_size, f_orig);
+    uint8_t *old_k_full;
+    rc = read_boot_kernel(f_orig, orig_boot_path, input_size, page_size, hdr.kernel_size, &old_k_full);
+    if (rc) {
+        fclose(f_orig);
+        return rc;
+    }
 
-
-    compress_head k_head;
-    memcpy(&k_head, old_k_full, sizeof(k_head));
+    compress_head k_head = compression_header(old_k_full, hdr.kernel_size);
     int method = detect_compress_method(k_head);
 
     //  DTB (v1/v2)
@@ -775,6 +800,11 @@ int repack_bootimg(const char *orig_boot_path,
         if (dtb_off > 0) {
             dtb_size = hdr.kernel_size - dtb_off;
             extracted_dtb = malloc(dtb_size);
+            if (!extracted_dtb) {
+                free(old_k_full);
+                fclose(f_orig);
+                return -ENOMEM;
+            }
             memcpy(extracted_dtb, old_k_full + dtb_off, dtb_size);
             tools_logi("Detected DTB appended to kernel. Size: %u\n", dtb_size);
         }
@@ -784,12 +814,22 @@ int repack_bootimg(const char *orig_boot_path,
 
     FILE *f_new_k = fopen(new_kernel_path, "rb");
     if (!f_new_k) { fclose(f_orig); if(extracted_dtb) free(extracted_dtb); return -3; }
-    fseek(f_new_k, 0, SEEK_END);
-    uint32_t raw_k_size = ftell(f_new_k);
-    fseek(f_new_k, 0, SEEK_SET);
-    uint8_t *raw_k_buf = malloc(raw_k_size);
-    fread(raw_k_buf, 1, raw_k_size, f_new_k);
+    int raw_len = bounded_file_size(f_new_k, new_kernel_path, IMAGE_MAX_FILE_SIZE);
+    uint8_t *raw_k_buf = NULL;
+    if (raw_len <= 0) {
+        rc = raw_len < 0 ? raw_len : -EINVAL;
+    } else {
+        raw_k_buf = malloc(raw_len);
+        rc = raw_k_buf ? read_exact(f_new_k, raw_k_buf, raw_len, new_kernel_path) : -ENOMEM;
+    }
     fclose(f_new_k);
+    if (rc) {
+        free(raw_k_buf);
+        free(extracted_dtb);
+        fclose(f_orig);
+        return rc;
+    }
+    uint32_t raw_k_size = raw_len;
 
     uint8_t *final_k_buf = raw_k_buf;
     uint32_t final_k_size = raw_k_size;
@@ -859,14 +899,29 @@ int repack_bootimg(const char *orig_boot_path,
     uint32_t rest_data_size = (total_size > rest_data_offset) ? (total_size - rest_data_offset) : 0;
     hdr.kernel_size = final_k_size + dtb_size;
     uint32_t checksum_aligned = ALIGN(fmt_size , page_size);
+    uint32_t use_sha256 = is_sha256(hdr.id);
+    int len = use_sha256 ? SHA256_BLOCK_SIZE : SHA1_BLOCK_SIZE;
+    BYTE buf[len];
     uint8_t *rest_buf_tmp = NULL;
     uint8_t *rest_buf = NULL;
     uint32_t rest_buf_offset  = 0;
     if (rest_data_size > 0) {
-        rest_buf_tmp = malloc(rest_data_size);
-        fseek(f_orig, rest_data_offset, SEEK_SET);
-        fread(rest_buf_tmp, 1, rest_data_size-sizeof(avb), f_orig);
-        for (int32_t i = (int32_t)rest_data_size - 1; i >= 0; i--) {
+        if (rest_data_size < sizeof(avb)) {
+            fprintf(stderr, "short read: truncated boot footer in %s\n", orig_boot_path);
+            rc = -EIO;
+            goto rest_read_error;
+        }
+        rest_buf_tmp = calloc(1, rest_data_size);
+        if (!rest_buf_tmp) {
+            rc = -ENOMEM;
+            goto rest_read_error;
+        }
+        if (fseek(f_orig, rest_data_offset, SEEK_SET) ||
+            read_exact(f_orig, rest_buf_tmp, rest_data_size - sizeof(avb), orig_boot_path)) {
+            rc = -EIO;
+            goto rest_read_error;
+        }
+        for (int32_t i = (int32_t)(rest_data_size - sizeof(avb)) - 1; i >= 0; i--) {
             if (rest_buf_tmp[i] != 0) {
                 rest_buf_offset = (uint32_t)(i + 1);
                 break;
@@ -879,7 +934,11 @@ int repack_bootimg(const char *orig_boot_path,
             rest_data_size = rest_buf_offset + sizeof(avb);
 
         }else{
-            rest_buf = malloc(rest_buf_offset);
+            rest_buf = malloc(rest_buf_offset ? rest_buf_offset : 1);
+            if (!rest_buf) {
+                rc = -ENOMEM;
+                goto rest_read_error;
+            }
             memcpy(rest_buf, rest_buf_tmp, rest_buf_offset);
             tools_logi("Rest data size: %u bytes, Actual used size: %u bytes\n", rest_data_size, rest_buf_offset);
             rest_data_size = rest_buf_offset;
@@ -889,9 +948,6 @@ int repack_bootimg(const char *orig_boot_path,
     }
     fclose(f_orig);
 
-    uint32_t use_sha256 = is_sha256(hdr.id);
-    int len = use_sha256 ? SHA256_BLOCK_SIZE : SHA1_BLOCK_SIZE;
-    BYTE buf[len];
     if (use_sha256 != 1 || header_ver <= 3) {
 
         if (use_sha256){
@@ -1066,6 +1122,14 @@ int repack_bootimg(const char *orig_boot_path,
 
     tools_logi("Repack completed: %s\n", out_boot_path);
     return 0;
+
+rest_read_error:
+    free(rest_buf_tmp);
+    free(compressed_buf);
+    free(raw_k_buf);
+    free(extracted_dtb);
+    fclose(f_orig);
+    return rc;
 }
 int cacluate_sha1(const char *file) {
     FILE *fp = fopen(file, "rb");

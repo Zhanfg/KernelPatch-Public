@@ -162,10 +162,13 @@ static long call_skey_get(char *__user out_key, int out_len)
 
 static long call_skey_set(char *__user new_key)
 {
-    char buf[SUPER_KEY_LEN];
-    int len = compat_strncpy_from_user(buf, new_key, sizeof(buf));
-    if (len >= SUPER_KEY_LEN && buf[SUPER_KEY_LEN - 1]) return -E2BIG;
-    reset_superkey(new_key);
+    /* The copy helper can NUL-terminate a truncated result at count - 1. */
+    char buf[SUPER_KEY_LEN + 1] = { 0 };
+    long len = compat_strncpy_from_user(buf, new_key, sizeof(buf));
+    if (len < 0) return len;
+    if (!len || !buf[0]) return -EINVAL;
+    if (strnlen(buf, SUPER_KEY_LEN) == SUPER_KEY_LEN) return -E2BIG;
+    reset_superkey(buf);
     return 0;
 }
 

@@ -33,6 +33,8 @@
 #include <kpm_safety.h>
 #include <accctl.h>
 
+#include "../../../include/kpm_elf.h"
+
 #define SZ_128M 0x08000000
 
 #define ALIGN_MASK(x, mask) (((x) + (mask)) & ~(mask))
@@ -47,26 +49,6 @@
 static inline bool strstarts(const char *str, const char *prefix)
 {
     return strncmp(str, prefix, strlen(prefix)) == 0;
-}
-
-/* True when [off, off+size) lies entirely inside the file. Avoids offset+size wrap. */
-static int elf_bytes_fit(unsigned long file_len, unsigned long off, unsigned long size)
-{
-    if (off > file_len) return 0;
-    if (size > file_len - off) return 0;
-    return 1;
-}
-
-/* sh_name / st_name must land on a NUL inside the string table. */
-static int elf_name_terminated(const char *strings, unsigned long size, unsigned long off)
-{
-    unsigned long i;
-
-    if (off >= size) return 0;
-    for (i = off; i < size; i++) {
-        if (strings[i] == '\0') return 1;
-    }
-    return 0;
 }
 
 /* Update size with this section: return offset. */
@@ -517,29 +499,16 @@ static int elf_validate_metadata(const Elf_Ehdr *ehdr, unsigned long len)
 {
     const Elf_Shdr *shdrs;
     const char *shstr;
-    unsigned long shoff, shnum, shstrndx, shstrsz, i, alloc_budget;
+    unsigned long shnum = ehdr->e_shnum, i, alloc_budget;
 
-    shnum = ehdr->e_shnum;
-    if (shnum == 0) return -ENOEXEC;
-    shoff = ehdr->e_shoff;
-    if (shoff > len || (shnum * sizeof(Elf_Shdr)) > len - shoff) return -ENOEXEC;
-
-    shdrs = (const Elf_Shdr *)((const char *)ehdr + shoff);
-    shstrndx = ehdr->e_shstrndx;
-    if (shstrndx == SHN_UNDEF || shstrndx >= shnum) return -ENOEXEC;
-    if (shdrs[shstrndx].sh_type == SHT_NOBITS) return -ENOEXEC;
-    if (!elf_bytes_fit(len, shdrs[shstrndx].sh_offset, shdrs[shstrndx].sh_size)) return -ENOEXEC;
-    shstr = (const char *)ehdr + shdrs[shstrndx].sh_offset;
-    shstrsz = shdrs[shstrndx].sh_size;
-
+    if (kpm_validate_sections((const char *)ehdr, len, ehdr)) return -ENOEXEC;
+    shdrs = (const Elf_Shdr *)((const char *)ehdr + ehdr->e_shoff);
+    shstr = (const char *)ehdr + shdrs[ehdr->e_shstrndx].sh_offset;
     alloc_budget = 0;
     for (i = 0; i < shnum; i++) {
         const Elf_Shdr *sh = &shdrs[i];
         unsigned long align;
         unsigned long entry;
-
-        if (sh->sh_type != SHT_NOBITS && !elf_bytes_fit(len, sh->sh_offset, sh->sh_size)) return -ENOEXEC;
-        if (!elf_name_terminated(shstr, shstrsz, sh->sh_name)) return -ENOEXEC;
 
         /* Each KPM callback section is read as a complete function pointer. */
         if ((sh->sh_flags & SHF_ALLOC) && sh->sh_size < sizeof(mod_initcall_t) &&
@@ -549,11 +518,7 @@ static int elf_validate_metadata(const Elf_Ehdr *ehdr, unsigned long len)
              !strcmp(shstr + sh->sh_name, ".kpm.ctl1") ||
              !strcmp(shstr + sh->sh_name, ".kpm.event"))) return -ENOEXEC;
 
-        if (sh->sh_type == SHT_SYMTAB || sh->sh_type == SHT_DYNSYM || sh->sh_type == SHT_REL || sh->sh_type == SHT_RELA) {
-            if (sh->sh_link >= shnum) return -ENOEXEC;
-        }
         if (sh->sh_type == SHT_REL || sh->sh_type == SHT_RELA) {
-            if (sh->sh_info >= shnum) return -ENOEXEC;
             entry = sh->sh_type == SHT_REL ? sizeof(Elf64_Rel) : sizeof(Elf64_Rela);
             if (sh->sh_entsize && sh->sh_entsize != entry) return -ENOEXEC;
             if (sh->sh_size % entry) return -ENOEXEC;
@@ -568,35 +533,12 @@ static int elf_validate_metadata(const Elf_Ehdr *ehdr, unsigned long len)
         alloc_budget += sh->sh_size;
     }
 
-    for (i = 0; i < shnum; i++) {
-        const Elf_Shdr *sh = &shdrs[i];
-        const Elf_Shdr *strsec;
-        const char *strtab;
-        const Elf_Sym *sym;
-        unsigned long count, s;
-
-        if (sh->sh_type != SHT_SYMTAB && sh->sh_type != SHT_DYNSYM) continue;
-        if (sh->sh_entsize && sh->sh_entsize != sizeof(Elf_Sym)) return -ENOEXEC;
-        if (sh->sh_type == SHT_NOBITS || sh->sh_size % sizeof(Elf_Sym)) return -ENOEXEC;
-        strsec = &shdrs[sh->sh_link];
-        if (strsec->sh_type == SHT_NOBITS || !elf_bytes_fit(len, strsec->sh_offset, strsec->sh_size)) return -ENOEXEC;
-        strtab = (const char *)ehdr + strsec->sh_offset;
-        sym = (const Elf_Sym *)((const char *)ehdr + sh->sh_offset);
-        count = sh->sh_size / sizeof(Elf_Sym);
-        for (s = 0; s < count; s++) {
-            unsigned int ndx = sym[s].st_shndx;
-
-            if (!elf_name_terminated(strtab, strsec->sh_size, sym[s].st_name)) return -ENOEXEC;
-            if (ndx == SHN_UNDEF || ndx == SHN_ABS || ndx == SHN_COMMON) continue;
-            if (ndx >= shnum) return -ENOEXEC;
-        }
-    }
     return 0;
 }
 
 static int elf_header_check(struct load_info *info)
 {
-    if (!info->hdr || info->len <= sizeof(*(info->hdr)) || info->len > SZ_128M) return -ENOEXEC;
+    if (!info->hdr || info->len <= sizeof(*(info->hdr)) || info->len > KPM_MAX_FILE_SIZE) return -ENOEXEC;
     if (memcmp(info->hdr->e_ident, ELFMAG, SELFMAG) || info->hdr->e_type != ET_REL || !elf_check_arch(info->hdr) ||
         info->hdr->e_shentsize != sizeof(Elf_Shdr))
         return -ENOEXEC;
@@ -779,34 +721,35 @@ long load_module_path(const char *path, const char *args, void *__user reserved)
     struct file *filp = filp_open(path, O_RDONLY, 0);
     if (unlikely(!filp || IS_ERR(filp))) {
         logkfe("open module: %s error\n", path);
-        rc = PTR_ERR(filp);
-        goto out;
+        return filp ? PTR_ERR(filp) : -ENOENT;
     }
+    void *data = NULL;
     loff_t len = vfs_llseek(filp, 0, SEEK_END);
     logkfd("module size: %llx\n", len);
-    vfs_llseek(filp, 0, SEEK_SET);
+    if (len < 0) {
+        rc = len;
+        goto close;
+    }
+    if (len <= (loff_t)sizeof(Elf_Ehdr) || len > KPM_MAX_FILE_SIZE) {
+        rc = -ENOEXEC;
+        goto close;
+    }
 
-    void *data = vmalloc(len);
+    data = vmalloc(len);
     if (!data) {
         rc = -ENOMEM;
-        goto out;
+        goto close;
     }
-    memset(data, 0, len);
-
     loff_t pos = 0;
-    kernel_read(filp, data, len, &pos);
-    filp_close(filp, 0);
-
-    if (pos != len) {
+    ssize_t n = kernel_read(filp, data, len, &pos);
+    if (n != len) {
         logkfe("read module: %s error\n", path);
-        rc = -EIO;
-        goto free;
+        rc = n < 0 ? n : -EIO;
     }
-
-    rc = load_module(data, len, args, "load-file", reserved);
-free:
-    kvfree(data);
-out:
+close:
+    filp_close(filp, 0);
+    if (!rc) rc = load_module(data, (int)len, args, "load-file", reserved);
+    if (data) kvfree(data);
     return rc;
 }
 

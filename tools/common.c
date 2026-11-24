@@ -37,21 +37,44 @@ int32_t relo_branch_func(const char *img, int32_t func_offset)
     return relo_offset;
 }
 
-void read_file_align(const char *path, char **con, int *out_len, int align)
+int bounded_file_size(FILE *fp, const char *path, int limit)
+{
+    long len;
+    if (fseek(fp, 0, SEEK_END) || (len = ftell(fp)) < 0 || fseek(fp, 0, SEEK_SET)) {
+        fprintf(stderr, "cannot measure file: %s\n", path);
+        return -EIO;
+    }
+    if (len > limit) {
+        fprintf(stderr, "file too large: %s (limit %d bytes)\n", path, limit);
+        return -EFBIG;
+    }
+    return (int)len;
+}
+
+int read_exact(FILE *fp, void *buf, size_t size, const char *path)
+{
+    size_t n = fread(buf, 1, size, fp);
+    if (n == size) return 0;
+    fprintf(stderr, "short read: %s (expected %zu bytes, got %zu)\n", path, size, n);
+    return -EIO;
+}
+
+int read_file_align(const char *path, char **con, int *out_len, int align, int limit)
 {
     FILE *fp = fopen(path, "rb");
     if (!fp) tools_log_errno_exit("open file %s\n", path);
-    fseek(fp, 0, SEEK_END);
-    int len = (int)ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    int align_len = (int)align_ceil(len, align);
-    char *buf = (char *)malloc(align_len);
-    memset(buf + len, 0, align_len - len);
-    int readlen = fread(buf, 1, len, fp);
-    if (readlen != len) tools_log_errno_exit("read file %s\n", path);
+    int len = bounded_file_size(fp, path, limit);
+    if (len < 0) exit(EXIT_FAILURE);
+    uint64_t padded = align_ceil(len, align);
+    if (padded > (unsigned)limit) tools_loge_exit("aligned file too large: %s\n", path);
+    char *buf = malloc(padded ? padded : 1);
+    if (!buf) tools_loge_exit("cannot allocate buffer for %s\n", path);
+    if (read_exact(fp, buf, len, path)) exit(EXIT_FAILURE);
     fclose(fp);
+    memset(buf + len, 0, padded - len);
     *con = buf;
-    *out_len = align_len;
+    *out_len = (int)padded;
+    return len;
 }
 
 void write_file(const char *path, const char *con, int len, bool append)
