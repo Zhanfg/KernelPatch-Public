@@ -6,6 +6,7 @@
 #include "image.h"
 
 #include <inttypes.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -47,9 +48,9 @@ typedef struct
     union _pe
     {
         // #ifdef CONFIG_EFI
-        uint64_t pe_offset; // Offset to the PE header.
+        uint32_t pe_offset; // Offset to the PE header.
         // #else
-        uint64_t npe_reserved;
+        uint32_t npe_reserved;
         // #endif
     } pe;
 } arm64_hdr_t;
@@ -58,9 +59,11 @@ int32_t get_kernel_info(kernel_info_t *kinfo, const char *img, int32_t imglen)
 {
     kinfo->is_be = 0;
 
-    arm64_hdr_t *khdr = (arm64_hdr_t *)img;
+    _Static_assert(sizeof(arm64_hdr_t) == 64, "ARM64 Image header size");
+    if (imglen < (int)sizeof(arm64_hdr_t)) tools_loge_exit("short ARM64 Image header\n");
+    const arm64_hdr_t *khdr = (const arm64_hdr_t *)img;
     if (strncmp(khdr->magic, KERNEL_MAGIC, strlen(KERNEL_MAGIC))) {
-        tools_loge_exit("kernel image magic error: %s\n", khdr->magic);
+        tools_loge_exit("kernel image magic error: %.4s\n", khdr->magic);
     }
 
     kinfo->uefi = !strncmp((const char *)khdr->hdr.efi.mz, EFI_MAGIC_SIG, strlen(EFI_MAGIC_SIG));
@@ -107,17 +110,14 @@ int32_t get_kernel_info(kernel_info_t *kinfo, const char *img, int32_t imglen)
     tools_logi("kernel image_size: 0x%08x\n", imglen);
     tools_logi("kernel uefi header: %s\n", kinfo->uefi ? "true" : "false");
     tools_logi("kernel load_offset: 0x%08x\n", kinfo->load_offset);
-    tools_logi("kernel kernel_size: 0x%08x\n", kinfo->kernel_size);
+    tools_logi("kernel kernel_size: 0x%08" PRIx64 "\n", kinfo->kernel_size);
     tools_logi("kernel page_shift: %d\n", kinfo->page_shift);
 
     return 0;
 }
 
-int32_t kernel_resize(kernel_info_t *kinfo, char *img, int32_t size)
+void kernel_resize(char *img, uint64_t size)
 {
-    arm64_hdr_t *khdr = (arm64_hdr_t *)img;
-    uint64_t ksize = size;
-    if (is_be() ^ kinfo->is_be) ksize = u64swp(size);
-    khdr->kernel_size_le = ksize;
-    return 0;
+    uint64_t size_le = u64le(size);
+    memcpy(img + offsetof(arm64_hdr_t, kernel_size_le), &size_le, sizeof(size_le));
 }

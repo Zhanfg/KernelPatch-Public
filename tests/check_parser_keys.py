@@ -93,11 +93,16 @@ def boot_checks(tmp, driver):
     run(tmp, [CLI, "unpacknolog", path])
     assert kernel.read_bytes() == payload
     kernel.unlink()
-    run(tmp, [driver, "unpack", path], b"short read")
+    # The merged reader loads the whole image before decoding, so a short
+    # payload is a truncated file rather than a short fread at the kernel
+    # offset; the property (explicit failure, no output file) is the same.
+    path.write_bytes(header + payload[:-1])
+    run(tmp, [driver, "unpack", path], b"truncated")
     assert not kernel.exists()
+    path.write_bytes(header + payload)
     for short in [header[:8], header + payload[:-1]]:
         path.write_bytes(short)
-        run(tmp, [CLI, "unpacknolog", path], b"short read")
+        run(tmp, [CLI, "unpacknolog", path], b"truncated")
         assert not kernel.exists()
     # Repack measures the replacement kernel separately from the source image.
     path.write_bytes((header + payload).ljust(3 * 4096, b"\0"))
@@ -113,7 +118,7 @@ def boot_checks(tmp, driver):
     kernel.unlink()
     struct.pack_into("<I", header, 8, IMAGE_LIMIT + 1)
     path.write_bytes(header)
-    run(tmp, [driver, "unpack", path], b"kernel too large")
+    run(tmp, [driver, "unpack", path], b"truncated kernel")
     with path.open("wb") as f:
         f.truncate(IMAGE_LIMIT + 1)
     run(tmp, [driver, "unpack", path], b"file too large")

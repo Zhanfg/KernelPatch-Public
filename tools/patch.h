@@ -52,17 +52,15 @@ typedef struct
 
 typedef struct
 {
-    char *kfile, *kimg;
-    int32_t kfile_len, kimg_len;
+    char prefix[20];
+    char *kimg;
+    int32_t kimg_len;
     bool is_uncompressed_img;
 } kernel_file_t;
 
 void read_kernel_file(const char *path, kernel_file_t *kernel_file);
-void new_kernel_file(kernel_file_t *kernel_file, kernel_file_t *old, int32_t kimg_len, bool is_different_endian);
-void update_kernel_file_img_len(kernel_file_t *kernel_file, int32_t kimg_len, bool is_different_endian);
 void write_kernel_file(kernel_file_t *kernel_file, const char *path);
 void free_kernel_file(kernel_file_t *kernel_file);
-int hex_patch(char *img, size_t imglen,const char *pattern_hex, const char *replace_hex);
 preset_t *get_preset(const char *kimg, int kimg_len);
 
 uint32_t get_kpimg_version(const char *kpimg_path);

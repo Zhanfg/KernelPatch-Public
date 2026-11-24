@@ -35,7 +35,7 @@ extern bool log_enable;
     do {                                                                                               \
         fprintf(stderr, "[-] %s:%d/%s(); " fmt " - %s\n", __FILE__, __LINE__, __func__, ##__VA_ARGS__, \
                 strerror(errno));                                                                      \
-        exit(errno);                                                                                   \
+        exit(errno ? errno : EXIT_FAILURE);                                                            \
     } while (0)
 
 /* Host image sizes and offsets are represented as signed ints. */
@@ -62,7 +62,13 @@ int can_b_imm(uint64_t from, uint64_t to);
 int b(uint32_t *buf, uint64_t from, uint64_t to);
 int32_t relo_branch_func(const char *img, int32_t func_offset);
 
-void write_file(const char *path, const char *con, int len, bool append);
+typedef struct {
+    const void *data; // NULL writes zero padding
+    size_t len;
+} file_part_t;
+
+void write_file_parts(const char *path, const file_part_t *parts, size_t count);
+void write_file(const char *path, const void *con, size_t len, bool append);
 
 int bounded_file_size(FILE *fp, const char *path, int limit);
 int read_exact(FILE *fp, void *buf, size_t size, const char *path);

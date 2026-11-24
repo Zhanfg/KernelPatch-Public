@@ -131,6 +131,10 @@ int main(int argc, char **argv)
     strcpy(image + 128, "Linux version 6.1.0\n");
     preset.setup.kimg_size = sizeof(image);
     preset.setup.kpimg_size = sizeof(preset);
+    /* A real patch run stores the original header and kernel size in the
+       preset; the merged info path restores from them before inspecting. */
+    memcpy(preset.setup.header_backup, image, sizeof(preset.setup.header_backup));
+    preset.setup.kernel_size = sizeof(image);
     write_file("image", image, sizeof(image), false);
     write_file("image", (const char *)&preset, sizeof(preset), true);
     patch_extra_item_t item = { .magic = EXTRA_HDR_MAGIC, .type = EXTRA_TYPE_KPM, .con_size = 1024 };

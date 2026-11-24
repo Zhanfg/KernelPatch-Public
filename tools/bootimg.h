@@ -29,15 +29,14 @@ struct boot_img_hdr {
     uint32_t id[8];
 	uint8_t extra_cmdline[1024];     // command
 
-    // v2 
-    uint32_t recovery_dtbo_size;     
-    uint64_t recovery_dtbo_offset;   
-         
-    
-    // v3 
-    uint32_t dtb_size;               
-    uint64_t dtb_addr;               
-};
+    // v1 extension
+    uint32_t recovery_dtbo_size;
+    uint64_t recovery_dtbo_offset;
+    uint32_t header_size;
+    // v2 extension
+    uint32_t dtb_size;
+    uint64_t dtb_addr;
+} __attribute__((packed));
 struct kernel_hdr {
 	uint32_t code0;      // Executable code
     uint32_t code1;      // Executable code
@@ -71,16 +70,10 @@ struct fdt_header {
     uint32_t size_dt_struct;
 };
 struct avb_footer {
-    uint32_t reverse[16];
-    /* 0x00 */ uint32_t magic;              /* ("AVBf") */
-    /* 0x04 */ uint32_t version;            /*  0x00000001 */
-    /* 0x08 */ uint64_t reserved1;          /*  0x0000000000000000 */
-    /* 0x10 */ uint32_t data_size1;         /*  0x00022FC000000000 */
-    /* 0x10 */ uint32_t data_size_1;         /*  0x00022FC000000000 */
-    /* 0x16 */ uint32_t data_size2;         /* same as data_size1 */
-    /* 0x16 */ uint32_t data_size_2;         /* same as data_size1 */
-    /* 0x20 */ uint64_t unknown_field;      /* 0x0000000000000940 */
-    /* 0x30 */ uint8_t  padding[24];        /*  */
+    uint8_t magic[4];
+    uint32_t major_be, minor_be;
+    uint64_t image_size_be, vbmeta_offset_be, vbmeta_size_be;
+    uint8_t reserved[28];
 } __attribute__((packed));
 
 int repack_bootimg(const char *orig_boot_path, 
