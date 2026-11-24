@@ -1011,16 +1011,6 @@ void module_init()
 
     kpm_safety_init();
 
-    /* Early boot counter (before /data mount) — protects embedded KPMs */
-    kpm_safety_early_count();
-
-    /* Full boot counter check (after /data mount available) */
-    if (kpm_safety_check_boot_count()) {
-        extern int kp_safe_mode;
-        kp_safe_mode = 1;
-        log_boot("kpm_safety: safe mode activated due to boot counter\n");
-    }
-
     compact_init();
     umount_init();
     selinux_hide_init();

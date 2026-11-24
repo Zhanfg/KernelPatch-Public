@@ -136,7 +136,18 @@ struct su_profile
 #define SUPERCALL_PROC_RENAME      0x1170  /* arg1: new_name __user * */
 
 /* KPM safety / crash protection */
-#define SUPERCALL_SAFETY_STATUS    0x1180  /* returns boot_count, safe_mode */
+/* Admin query. arg1 points to this output structure. Returns 0 or -errno. */
+struct kpm_safety_status
+{
+    int boot_count;              /* current attempt, -1 if unknown, 0 after boot-completed */
+    int safe_mode;               /* live kp_safe_mode */
+    unsigned int storage_errors; /* stores that failed the last count update/reset */
+};
+
+#define KPM_COUNT_EARLY_ERROR (1U << 0)
+#define KPM_COUNT_DATA_ERROR  (1U << 1)
+
+#define SUPERCALL_SAFETY_STATUS    0x1180
 #define SUPERCALL_SAFETY_BL_CLEAR  0x1181  /* clear blacklist */
 #define SUPERCALL_SAFETY_BL_ADD    0x1182  /* arg1: kpm_name __user * */
 

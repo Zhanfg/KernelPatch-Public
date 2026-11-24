@@ -309,6 +309,14 @@ static long call_set_safemode(int mode)
     return 0;
 }
 
+static long call_safety_status(struct kpm_safety_status __user *out)
+{
+    struct kpm_safety_status status;
+    if (!out) return -EFAULT;
+    kpm_safety_get_status(&status);
+    return compat_copy_to_user(out, &status, sizeof(status)) == sizeof(status) ? 0 : -EFAULT;
+}
+
 /* KPM event trigger */
 static long call_kpm_event(int event, const char __user *usource, const char __user *uargs)
 {
@@ -438,6 +446,8 @@ static long supercall(enum supercall_role role, long cmd, long arg1, long arg2, 
     }
 
     /* KPM safety / crash protection */
+    case SUPERCALL_SAFETY_STATUS:
+        return call_safety_status((struct kpm_safety_status __user *)arg1);
     case SUPERCALL_SAFETY_BL_CLEAR:
         kpm_safety_clear_blacklist();
         return 0;
