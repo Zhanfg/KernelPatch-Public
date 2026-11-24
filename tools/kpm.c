@@ -9,107 +9,47 @@
 
 #include "kpm.h"
 
-#define elf_check_arch(x) ((x)->e_machine == EM_AARCH64)
-
-static char *next_string(char *string, uint64_t *secsize)
+/* The caller verifies that the last record ends inside the section. */
+static const char *get_modinfo(const char *base, size_t size, const char *tag)
 {
-    while (string[0]) {
-        string++;
-        if ((*secsize)-- <= 1) return 0;
+    size_t taglen = strlen(tag);
+    const char *end = base + size;
+    for (const char *p = base; p < end; p += strlen(p) + 1) {
+        if (!strncmp(p, tag, taglen) && p[taglen] == '=') return p + taglen + 1;
     }
-    while (!string[0]) {
-        string++;
-        if ((*secsize)-- <= 1) return 0;
-    }
-    return string;
-}
-
-static char *get_next_modinfo(const struct load_info *info, const char *tag, char *prev)
-{
-    char *p;
-    uint32_t taglen = strlen(tag);
-    Elf_Shdr *infosec = &info->sechdrs[info->index.info];
-    uint64_t size = infosec->sh_size;
-    char *modinfo = (char *)info->hdr + infosec->sh_offset;
-    if (prev) {
-        size -= prev - modinfo;
-        modinfo = next_string(prev, &size);
-    }
-    for (p = modinfo; p; p = next_string(p, &size)) {
-        if (strncmp(p, tag, taglen) == 0 && p[taglen] == '=') return p + taglen + 1;
-    }
-    return 0;
-}
-
-static char *get_modinfo(const struct load_info *info, const char *tag)
-{
-    return get_next_modinfo(info, tag, 0);
-}
-
-static int find_sec(const struct load_info *info, const char *name)
-{
-    for (int i = 1; i < info->hdr->e_shnum; i++) {
-        Elf_Shdr *shdr = &info->sechdrs[i];
-        if ((shdr->sh_flags & SHF_ALLOC) && strcmp(info->secstrings + shdr->sh_name, name) == 0) return i;
-    }
-    return 0;
-}
-
-static void *get_sh_base(struct load_info *info, const char *secname)
-{
-    int idx = find_sec(info, secname);
-    if (!idx) return 0;
-    Elf_Shdr *infosec = &info->sechdrs[idx];
-    void *addr = (void *)info->hdr + infosec->sh_offset;
-    return addr;
-}
-
-static uint64_t get_sh_size(struct load_info *info, const char *secname)
-{
-    int idx = find_sec(info, secname);
-    if (!idx) return 0;
-    Elf_Shdr *infosec = &info->sechdrs[idx];
-    return infosec->sh_entsize;
+    return NULL;
 }
 
 int get_kpm_info(const char *kpm, int len, kpm_info_t *out_info)
 {
-    struct load_info load_info = { .len = len, .hdr = (Elf_Ehdr *)kpm };
-    struct load_info *info = &load_info;
+    Elf64_Ehdr hdr;
+    if (!kpm || len <= (int)sizeof(hdr) || len > KPM_MAX_FILE_SIZE) return -ENOEXEC;
+    memcpy(&hdr, kpm, sizeof(hdr));
+    if (memcmp(hdr.e_ident, ELFMAG, SELFMAG) || hdr.e_type != ET_REL || hdr.e_machine != EM_AARCH64 ||
+        hdr.e_shentsize != sizeof(Elf64_Shdr)) return -ENOEXEC;
+    if (kpm_validate_sections(kpm, len, &hdr)) return -ENOEXEC;
 
-    // header check
-    if (info->len <= sizeof(*(info->hdr))) return -ENOEXEC;
-    if (memcmp(info->hdr->e_ident, ELFMAG, SELFMAG) || info->hdr->e_type != ET_REL || !elf_check_arch(info->hdr) ||
-        info->hdr->e_shentsize != sizeof(Elf_Shdr))
-        return -ENOEXEC;
-    if (info->hdr->e_shoff >= info->len || (info->hdr->e_shnum * sizeof(Elf_Shdr) > info->len - info->hdr->e_shoff))
-        return -ENOEXEC;
+    const char *table = kpm + hdr.e_shoff;
+    const char *names = kpm + kpm_section(table, hdr.e_shstrndx).sh_offset;
+    for (unsigned int i = 1; i < hdr.e_shnum; i++) {
+        Elf64_Shdr sh = kpm_section(table, i);
+        if (!(sh.sh_flags & SHF_ALLOC) || strcmp(names + sh.sh_name, ".kpm.info")) continue;
+        if (sh.sh_type == SHT_NOBITS || !sh.sh_size) return -ENOEXEC;
+        const char *base = kpm + sh.sh_offset;
+        if (base[sh.sh_size - 1]) return -ENOEXEC;
 
-    info->sechdrs = (void *)info->hdr + info->hdr->e_shoff;
-    info->secstrings = (void *)info->hdr + info->sechdrs[info->hdr->e_shstrndx].sh_offset;
-    info->sechdrs[0].sh_addr = 0;
-    for (int i = 1; i < info->hdr->e_shnum; i++) {
-        Elf_Shdr *shdr = &info->sechdrs[i];
-        if (shdr->sh_type != SHT_NOBITS && info->len < shdr->sh_offset + shdr->sh_size) {
-            return -ENOEXEC;
-        }
-        shdr->sh_addr = (size_t)info->hdr + shdr->sh_offset;
+        out_info->name = get_modinfo(base, sh.sh_size, "name");
+        out_info->version = get_modinfo(base, sh.sh_size, "version");
+        if (!out_info->name || !out_info->version) return -ENOEXEC;
+        out_info->license = get_modinfo(base, sh.sh_size, "license");
+        out_info->author = get_modinfo(base, sh.sh_size, "author");
+        out_info->description = get_modinfo(base, sh.sh_size, "description");
+        if (!out_info->license) out_info->license = "(null)";
+        if (!out_info->author) out_info->author = "(null)";
+        if (!out_info->description) out_info->description = "(null)";
+        return 0;
     }
-    info->index.info = find_sec(info, ".kpm.info");
-    if (!info->index.info) {
-        tools_loge("no .kpm.info section\n");
-        return -ENOEXEC;
-    }
-    info->info.base = get_sh_base(info, ".kpm.info");
-    info->info.size = get_sh_size(info, ".kpm.info");
-
-    out_info->name = get_modinfo(info, "name");
-    out_info->version = get_modinfo(info, "version");
-    out_info->license = get_modinfo(info, "license");
-    out_info->author = get_modinfo(info, "author");
-    out_info->description = get_modinfo(info, "description");
-
-    return 0;
+    return -ENOEXEC;
 }
 
 void print_kpm_info(kpm_info_t *info)
@@ -125,12 +65,14 @@ int print_kpm_info_path(const char *kpm_path)
 {
     char *img;
     int len = 0;
-    read_file(kpm_path, &img, &len);
-    fprintf(stdout, INFO_EXTRA_KPM_SESSION "\n");
+    read_file_align(kpm_path, &img, &len, 1, KPM_MAX_FILE_SIZE);
     kpm_info_t kpm_info = { 0 };
     int rc = get_kpm_info(img, len, &kpm_info);
     if (!rc) {
+        fprintf(stdout, INFO_EXTRA_KPM_SESSION "\n");
         print_kpm_info(&kpm_info);
+    } else {
+        fprintf(stderr, "invalid KPM metadata: %s\n", kpm_path);
     }
     free(img);
     return rc;
