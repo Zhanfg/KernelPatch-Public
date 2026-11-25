@@ -226,14 +226,11 @@ static void test_many_names_stop_at_capacity(void)
 }
 
 #ifdef KPM_QUERY_MODULE_TEST
-#include <elf.h>
+#include "../tools/elf/elf.h"
 #include <stdint.h>
 #include "../include/kpm_elf.h"
-typedef void (*mod_initcall_t)(void);
 typedef Elf64_Ehdr Elf_Ehdr;
 typedef Elf64_Shdr Elf_Shdr;
-typedef Elf64_Sym Elf_Sym;
-#define SZ_128M 0x08000000
 struct module {
     struct { const char *name, *version, *license, *author, *description; } info;
     const char *args;
@@ -303,6 +300,7 @@ static void test_callback_slot_bounds(void)
         char payload[16];
     } image = {0};
     const char *names[] = { ".kpm.ctl0", ".kpm.ctl1", ".kpm.event" };
+    struct kpm_sections sections = {0};
     size_t i, size;
     image.header.e_shoff = offsetof(__typeof__(image), sections);
     image.header.e_shnum = 3;
@@ -318,15 +316,15 @@ static void test_callback_slot_bounds(void)
         strcpy(image.names + 1, names[i]);
         for (size = 0; size <= 8; ++size) {
             image.sections[2].sh_size = size;
-            expect_int(names[i], elf_validate_metadata(&image.header, sizeof(image)),
+            expect_int(names[i], kpm_validate_sections((const char *)&image, sizeof(image), &image.header, &sections),
                        size < 8 ? -ENOEXEC : 0);
         }
     }
     image.sections[2].sh_offset = ~0UL - 3;
     image.sections[2].sh_size = 8;
-    expect_int("wrapped section end", elf_validate_metadata(&image.header, sizeof(image)), -ENOEXEC);
+    expect_int("wrapped section end", kpm_validate_sections((const char *)&image, sizeof(image), &image.header, &sections), -ENOEXEC);
     image.header.e_shoff = ~0UL;
-    expect_int("wrapped section table", elf_validate_metadata(&image.header, sizeof(image)), -ENOEXEC);
+    expect_int("wrapped section table", kpm_validate_sections((const char *)&image, sizeof(image), &image.header, &sections), -ENOEXEC);
 }
 #endif
 

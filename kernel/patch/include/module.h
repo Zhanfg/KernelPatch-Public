@@ -10,25 +10,6 @@
 #include <kpmodule.h>
 #include <uapi/kpm_event.h>
 
-struct load_info
-{
-    struct
-    {
-        const char *base;
-        unsigned long size;
-        const char *name, *version, *license, *author, *description;
-    } info;
-    const Elf_Ehdr *hdr;
-    unsigned long len;
-    Elf_Shdr *sechdrs;
-    char *secstrings, *strtab;
-    unsigned long symoffs, stroffs;
-    struct
-    {
-        unsigned int sym, str, mod, info;
-    } index;
-};
-
 struct module
 {
     struct
