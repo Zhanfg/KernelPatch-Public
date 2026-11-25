@@ -289,7 +289,6 @@ def check_host_behavior() -> list[str]:
     sources = {MODULE: find_functions(MODULE.read_text()),
                SUPERCALL: find_functions(SUPERCALL.read_text())}
     selected = [
-        (MODULE, "static int elf_validate_metadata(const Elf_Ehdr *ehdr, unsigned long len)", "elf_validate_metadata"),
         (MODULE, "int get_module_info(const char *name, char *out_info, int size)", "get_module_info"),
         (SUPERCALL, "static long call_kpm_info(const char *uname, char *out_info, int out_len)", "call_kpm_info"),
     ]

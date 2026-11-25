@@ -37,6 +37,7 @@ jobs:
             tests/kpm_query_bounds_test.c
           "$RUNNER_TEMP/kpm_query_bounds_test"
           python3 tests/check_kpm_rcu_paths.py
+          python3 tests/check_kpm_admission.py
 
       - name: Verify immutable legacy baseline
         run: |
